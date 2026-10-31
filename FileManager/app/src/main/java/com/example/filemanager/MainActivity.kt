@@ -135,10 +135,38 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
     val hasClipboardData by viewModel.hasClipboardData.collectAsState()
     val context = LocalContext.current 
     
-    // NUEVO: Interceptor del botón Atrás (Gesto físico / Touch bar)
+    // Estado para controlar el diálogo de confirmación de borrado
+    var fileToDelete by remember { mutableStateOf<File?>(null) }
+    
     val isRoot = currentDir?.parentFile == null
     BackHandler(enabled = !isRoot) {
         viewModel.navigateUp()
+    }
+
+    // NUEVO: Cuadro de diálogo de confirmación
+    if (fileToDelete != null) {
+        AlertDialog(
+            onDismissRequest = { fileToDelete = null },
+            title = { Text("Confirmar eliminación") },
+            text = { 
+                Text("¿Estás seguro de que deseas eliminar '${fileToDelete?.name}'? Esta acción no se puede deshacer.") 
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        fileToDelete?.let { viewModel.deleteFile(it) }
+                        fileToDelete = null
+                    }
+                ) {
+                    Text("Borrar", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { fileToDelete = null }) {
+                    Text("Cancelar")
+                }
+            }
+        )
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
@@ -180,7 +208,8 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
                     Row {
                         TextButton(onClick = { viewModel.copyFile(file) }) { Text("Copiar") }
                         TextButton(onClick = { viewModel.cutFile(file) }) { Text("Cortar") }
-                        TextButton(onClick = { viewModel.deleteFile(file) }) { Text("Borrar") }
+                        // Modificado para mostrar el diálogo en lugar de borrar directamente
+                        TextButton(onClick = { fileToDelete = file }) { Text("Borrar") }
                     }
                 }
                 HorizontalDivider()
