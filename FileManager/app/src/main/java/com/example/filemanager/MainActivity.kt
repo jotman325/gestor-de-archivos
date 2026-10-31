@@ -16,6 +16,8 @@ import androidx.activity.compose.setContent
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -23,19 +25,25 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import coil.compose.AsyncImage
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.io.File
 
-// --- VIEWMODEL (Lógica de archivos y portapapeles) ---
+// --- VIEWMODEL (Lógica principal) ---
 class FileManagerViewModel : ViewModel() {
     private val _currentDirectory = MutableStateFlow(Environment.getExternalStorageDirectory())
     val currentDirectory: StateFlow<File> = _currentDirectory
 
     private val _files = MutableStateFlow<List<File>>(emptyList())
     val files: StateFlow<List<File>> = _files
+
+    // Estado del buscador
+    private val _searchQuery = MutableStateFlow("")
+    val searchQuery: StateFlow<String> = _searchQuery
 
     private var clipboardFile: File? = null
     private var isCutOperation: Boolean = false
@@ -45,14 +53,24 @@ class FileManagerViewModel : ViewModel() {
 
     init { loadFiles() }
 
+    fun updateSearchQuery(query: String) {
+        _searchQuery.value = query
+        loadFiles()
+    }
+
     fun loadFiles() {
-        _files.value = _currentDirectory.value?.listFiles()?.toList() ?: emptyList()
+        val allFiles = _currentDirectory.value?.listFiles()?.toList() ?: emptyList()
+        _files.value = if (_searchQuery.value.isBlank()) {
+            allFiles
+        } else {
+            allFiles.filter { it.name.contains(_searchQuery.value, ignoreCase = true) }
+        }
     }
 
     fun openDirectory(file: File) {
         if (file.isDirectory) {
             _currentDirectory.value = file
-            loadFiles()
+            updateSearchQuery("") // Limpiar búsqueda al cambiar de carpeta
         }
     }
 
@@ -60,7 +78,7 @@ class FileManagerViewModel : ViewModel() {
         val parent = _currentDirectory.value?.parentFile
         if (parent != null && parent.canRead()) {
             _currentDirectory.value = parent
-            loadFiles()
+            updateSearchQuery("")
             return true
         }
         return false
@@ -105,6 +123,14 @@ class FileManagerViewModel : ViewModel() {
         loadFiles()
     }
 
+    // NUEVO: Renombrar archivo
+    fun renameFile(file: File, newName: String) {
+        val newFile = File(file.parent, newName)
+        if (file.renameTo(newFile)) {
+            loadFiles()
+        }
+    }
+
     fun openFile(context: Context, file: File) {
         try {
             val intent = Intent(Intent.ACTION_VIEW)
@@ -113,6 +139,7 @@ class FileManagerViewModel : ViewModel() {
             
             var mimeType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
             
+            // Integración explícita del instalador de paquetes APK
             if (extension == "apk") {
                 mimeType = "application/vnd.android.package-archive"
             }
@@ -127,55 +154,79 @@ class FileManagerViewModel : ViewModel() {
     }
 }
 
-// --- INTERFAZ GRAFICA (Compose) ---
+// --- INTERFAZ GRÁFICA (Compose) ---
 @Composable
 fun FileListScreen(viewModel: FileManagerViewModel) {
     val files by viewModel.files.collectAsState()
     val currentDir by viewModel.currentDirectory.collectAsState()
     val hasClipboardData by viewModel.hasClipboardData.collectAsState()
+    val searchQuery by viewModel.searchQuery.collectAsState()
     val context = LocalContext.current 
     
-    // Estado para controlar el diálogo de confirmación de borrado
+    // Control de diálogos
     var fileToDelete by remember { mutableStateOf<File?>(null) }
+    var fileToRename by remember { mutableStateOf<File?>(null) }
+    var newFileName by remember { mutableStateOf("") }
     
     val isRoot = currentDir?.parentFile == null
-    BackHandler(enabled = !isRoot) {
-        viewModel.navigateUp()
-    }
+    BackHandler(enabled = !isRoot) { viewModel.navigateUp() }
 
-    // NUEVO: Cuadro de diálogo de confirmación
+    // Diálogo de confirmación de borrado
     if (fileToDelete != null) {
         AlertDialog(
             onDismissRequest = { fileToDelete = null },
             title = { Text("Confirmar eliminación") },
-            text = { 
-                Text("¿Estás seguro de que deseas eliminar '${fileToDelete?.name}'? Esta acción no se puede deshacer.") 
+            text = { Text("¿Eliminar '${fileToDelete?.name}' permanentemente?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    fileToDelete?.let { viewModel.deleteFile(it) }
+                    fileToDelete = null
+                }) { Text("Borrar", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { fileToDelete = null }) { Text("Cancelar") } }
+        )
+    }
+
+    // Diálogo para renombrar
+    if (fileToRename != null) {
+        AlertDialog(
+            onDismissRequest = { fileToRename = null },
+            title = { Text("Renombrar archivo") },
+            text = {
+                OutlinedTextField(
+                    value = newFileName,
+                    onValueChange = { newFileName = it },
+                    label = { Text("Nuevo nombre con extensión") },
+                    singleLine = true
+                )
             },
             confirmButton = {
-                TextButton(
-                    onClick = {
-                        fileToDelete?.let { viewModel.deleteFile(it) }
-                        fileToDelete = null
+                TextButton(onClick = {
+                    if (newFileName.isNotBlank()) {
+                        fileToRename?.let { viewModel.renameFile(it, newFileName) }
                     }
-                ) {
-                    Text("Borrar", color = MaterialTheme.colorScheme.error)
-                }
+                    fileToRename = null
+                }) { Text("Guardar") }
             },
-            dismissButton = {
-                TextButton(onClick = { fileToDelete = null }) {
-                    Text("Cancelar")
-                }
-            }
+            dismissButton = { TextButton(onClick = { fileToRename = null }) { Text("Cancelar") } }
         )
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Text(text = "Ruta: ${currentDir?.absolutePath ?: "/"}", style = MaterialTheme.typography.titleMedium)
+        // NUEVO: Buscador de archivos
+        OutlinedTextField(
+            value = searchQuery,
+            onValueChange = { viewModel.updateSearchQuery(it) },
+            label = { Text("🔎 Buscar archivo...") },
+            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+            singleLine = true
+        )
+        
+        Text(text = "Ruta: ${currentDir?.absolutePath ?: "/"}", style = MaterialTheme.typography.labelMedium)
         Spacer(modifier = Modifier.height(8.dp))
+        
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Button(onClick = { viewModel.navigateUp() }, enabled = !isRoot) {
-                Text("⬆ Subir")
-            }
+            Button(onClick = { viewModel.navigateUp() }, enabled = !isRoot) { Text("⬆ Subir") }
             if (hasClipboardData) {
                 Row {
                     Button(onClick = { viewModel.pasteFile() }, modifier = Modifier.padding(end = 8.dp)) { Text("📋 Pegar") }
@@ -183,32 +234,48 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
                 }
             }
         }
+        
         Spacer(modifier = Modifier.height(12.dp))
+        
         LazyColumn {
             items(files) { file ->
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable {
-                            if (file.isDirectory) {
-                                viewModel.openDirectory(file)
-                            } else {
-                                viewModel.openFile(context, file)
-                            }
+                            if (file.isDirectory) viewModel.openDirectory(file)
+                            else viewModel.openFile(context, file)
                         }
                         .padding(vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = if (file.isDirectory) "📁 ${file.name}" else "📄 ${file.name}",
-                        style = MaterialTheme.typography.bodyLarge,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Row {
+                    // NUEVO: Sistema de miniaturas
+                    val isImage = file.extension.lowercase() in listOf("jpg", "jpeg", "png", "webp", "gif", "bmp")
+                    if (isImage) {
+                        AsyncImage(
+                            model = file,
+                            contentDescription = "Miniatura",
+                            modifier = Modifier.size(40.dp).padding(end = 12.dp),
+                            contentScale = ContentScale.Crop
+                        )
+                    } else {
+                        Text(
+                            text = if (file.isDirectory) "📁" else "📄",
+                            modifier = Modifier.padding(end = 12.dp),
+                            style = MaterialTheme.typography.titleLarge
+                        )
+                    }
+
+                    Text(text = file.name, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                    
+                    // Botones de acción en scroll horizontal
+                    Row(modifier = Modifier.horizontalScroll(rememberScrollState())) {
                         TextButton(onClick = { viewModel.copyFile(file) }) { Text("Copiar") }
                         TextButton(onClick = { viewModel.cutFile(file) }) { Text("Cortar") }
-                        // Modificado para mostrar el diálogo en lugar de borrar directamente
+                        TextButton(onClick = { 
+                            fileToRename = file
+                            newFileName = file.name
+                        }) { Text("Renombrar") }
                         TextButton(onClick = { fileToDelete = file }) { Text("Borrar") }
                     }
                 }
