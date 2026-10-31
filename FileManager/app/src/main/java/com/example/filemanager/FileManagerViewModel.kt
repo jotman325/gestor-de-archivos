@@ -1,154 +1,96 @@
 package com.example.filemanager
 
+import android.os.Environment
 import androidx.lifecycle.ViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 import java.io.File
 
-/**
- * Estado de la UI del gestor de archivos.
- */
-data class FileManagerUiState(
-    /** Directorio que se está visualizando actualmente. */
-    val currentDirectory: File = File("/storage/emulated/0"),
-    /** Lista de elementos dentro del directorio actual. */
-    val items: List<FileItem> = emptyList(),
-    /** Pila de directorios visitados para navegación hacia atrás. */
-    val backStack: List<File> = emptyList(),
-    /** Mensaje de error o información para el usuario. */
-    val userMessage: String? = null,
-    /** Indica si estamos en la raíz del almacenamiento. */
-    val isAtRoot: Boolean = true
-)
-
-/**
- * ViewModel que gestiona la lógica de navegación y operaciones del gestor de archivos.
- *
- * Usa [java.io.File] para recorrer el almacenamiento local y expone un
- * [StateFlow] con el estado reactivo para Jetpack Compose.
- */
 class FileManagerViewModel : ViewModel() {
+    private val _currentDirectory = MutableStateFlow(Environment.getExternalStorageDirectory())
+    val currentDirectory: StateFlow<File> = _currentDirectory
 
-    companion object {
-        /** Directorio raíz del almacenamiento externo. */
-        val ROOT = File("/storage/emulated/0")
-    }
+    private val _files = MutableStateFlow<List<File>>(emptyList())
+    val files: StateFlow<List<File>> = _files
 
-    private val _uiState = MutableStateFlow(FileManagerUiState())
-    val uiState: StateFlow<FileManagerUiState> = _uiState.asStateFlow()
+    // Clipboard state
+    private var clipboardFile: File? = null
+    private var isCutOperation: Boolean = false
+
+    private val _hasClipboardData = MutableStateFlow(false)
+    val hasClipboardData: StateFlow<Boolean> = _hasClipboardData
 
     init {
-        loadDirectory(ROOT)
+        loadFiles()
     }
 
-    // ── Navegación ──────────────────────────────────────────────────────
+    fun loadFiles() {
+        _files.value = _currentDirectory.value?.listFiles()?.toList() ?: emptyList()
+    }
 
-    /**
-     * Carga el contenido de [directory] y actualiza el estado.
-     * Los elementos se ordenan: carpetas primero, luego archivos, ambos
-     * alfabéticamente sin distinguir mayúsculas/minúsculas.
-     */
-    fun loadDirectory(directory: File) {
-        val files = directory.listFiles()
-        if (files == null) {
-            _uiState.update { it.copy(userMessage = "No se puede acceder a: ${directory.absolutePath}") }
-            return
-        }
-
-        val items = files
-            .filter { !it.isHidden }
-            .map { FileItem(it) }
-            .sortedWith(compareByDescending<FileItem> { it.isDirectory }.thenBy { it.name.lowercase() })
-
-        _uiState.update {
-            it.copy(
-                currentDirectory = directory,
-                items = items,
-                isAtRoot = directory.absolutePath == ROOT.absolutePath,
-                userMessage = null
-            )
+    fun openDirectory(file: File) {
+        if (file.isDirectory) {
+            _currentDirectory.value = file
+            loadFiles()
         }
     }
 
-    /**
-     * Entra en una carpeta, guardando el directorio actual en la pila de retroceso.
-     */
-    fun navigateInto(folder: FileItem) {
-        if (!folder.isDirectory) return
-        _uiState.update { state ->
-            state.copy(backStack = state.backStack + state.currentDirectory)
+    fun navigateUp(): Boolean {
+        val parent = _currentDirectory.value?.parentFile
+        if (parent != null && parent.canRead()) {
+            _currentDirectory.value = parent
+            loadFiles()
+            return true
         }
-        loadDirectory(folder.file)
+        return false
     }
 
-    /**
-     * Retrocede al directorio anterior de la pila.
-     * @return `true` si se pudo retroceder, `false` si ya estábamos en la raíz.
-     */
-    fun navigateBack(): Boolean {
-        val state = _uiState.value
-        if (state.backStack.isEmpty()) return false
-
-        val previous = state.backStack.last()
-        _uiState.update { it.copy(backStack = it.backStack.dropLast(1)) }
-        loadDirectory(previous)
-        return true
+    fun deleteFile(file: File): Boolean {
+        val deleted = if (file.isDirectory) file.deleteRecursively() else file.delete()
+        if (deleted) loadFiles()
+        return deleted
     }
 
-    // ── Operaciones sobre archivos ──────────────────────────────────────
+    fun copyFile(file: File) {
+        clipboardFile = file
+        isCutOperation = false
+        _hasClipboardData.value = true
+    }
 
-    /**
-     * Elimina un archivo o carpeta (recursivamente si es directorio).
-     */
-    fun delete(item: FileItem) {
-        val success = if (item.isDirectory) {
-            item.file.deleteRecursively()
-        } else {
-            item.file.delete()
+    fun cutFile(file: File) {
+        clipboardFile = file
+        isCutOperation = true
+        _hasClipboardData.value = true
+    }
+
+    fun pasteFile(): Boolean {
+        val source = clipboardFile ?: return false
+        if (!source.exists()) return false
+
+        val target = File(_currentDirectory.value, source.name)
+        
+        val success = try {
+            if (isCutOperation) {
+                source.renameTo(target)
+            } else {
+                source.copyRecursively(target, overwrite = true)
+            }
+        } catch (e: Exception) {
+            false
         }
 
         if (success) {
-            refresh()
-        } else {
-            _uiState.update { it.copy(userMessage = "No se pudo eliminar: ${item.name}") }
+            if (isCutOperation) {
+                clearClipboard()
+            }
+            loadFiles()
         }
+        return success
     }
 
-    /**
-     * Renombra un archivo o carpeta.
-     *
-     * @param item    Elemento a renombrar.
-     * @param newName Nuevo nombre (sólo el nombre, sin ruta).
-     */
-    fun rename(item: FileItem, newName: String) {
-        if (newName.isBlank()) {
-            _uiState.update { it.copy(userMessage = "El nombre no puede estar vacío.") }
-            return
-        }
-
-        val destination = File(item.file.parentFile, newName)
-        if (destination.exists()) {
-            _uiState.update { it.copy(userMessage = "Ya existe un elemento llamado \"$newName\".") }
-            return
-        }
-
-        val success = item.file.renameTo(destination)
-        if (success) {
-            refresh()
-        } else {
-            _uiState.update { it.copy(userMessage = "No se pudo renombrar: ${item.name}") }
-        }
-    }
-
-    /** Recarga el directorio actual. */
-    fun refresh() {
-        loadDirectory(_uiState.value.currentDirectory)
-    }
-
-    /** Descarta el mensaje de usuario visible. */
-    fun clearMessage() {
-        _uiState.update { it.copy(userMessage = null) }
+    fun clearClipboard() {
+        clipboardFile = null
+        isCutOperation = false
+        _hasClipboardData.value = false
     }
 }
