@@ -16,7 +16,7 @@
         android:label="@string/app_name"
         android:requestLegacyExternalStorage="true"
         android:supportsRtl="true"
-        android:theme="@android:style/Theme.Material.Light.NoTitleBar">
+        android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar"
 
         <activity
             android:name=".MainActivity"
