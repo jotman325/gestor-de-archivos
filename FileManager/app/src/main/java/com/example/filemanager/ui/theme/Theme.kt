@@ -8,17 +8,7 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-
-// Colores definidos internamente
-private val Blue80 = Color(0xFFD0BCFF)
-private val BlueGrey80 = Color(0xFFCCC2DC)
-private val Teal80 = Color(0xFFEFB8C8)
-
-private val Blue40 = Color(0xFF6650a4)
-private val BlueGrey40 = Color(0xFF625b71)
-private val Teal40 = Color(0xFF7D5260)
 
 private val DarkColorScheme = darkColorScheme(
     primary = Blue80,
@@ -49,7 +39,6 @@ fun FileManagerTheme(
 
     MaterialTheme(
         colorScheme = colorScheme,
-        // Referencia a Typography eliminada para usar los valores por defecto y evitar errores en Type.kt
         content = content
     )
 }
