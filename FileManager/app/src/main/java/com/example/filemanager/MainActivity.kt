@@ -515,4 +515,27 @@ class FileManagerViewModel : ViewModel() {
                     while (zipEntry != null) {
                         val newFile = File(destDir, zipEntry.name)
                         if (zipEntry.isDirectory) {
-        
+                            newFile.mkdirs()
+                        } else {
+                            newFile.parentFile?.mkdirs()
+                            FileOutputStream(newFile).use { fos ->
+                                val buffer = ByteArray(1024)
+                                var len: Int
+                                while (zis.read(buffer).also { len = it } > 0) {
+                                    fos.write(buffer, 0, len)
+                                }
+                            }
+                        }
+                        zipEntry = zis.nextEntry
+                    }
+                    zis.closeEntry()
+                }
+                launch(Dispatchers.Main) {
+                    if (_currentCategory.value == FileCategory.ALL || _currentCategory.value == FileCategory.TRASH) loadFiles() else setCategory(_currentCategory.value)
+                    Toast.makeText(context, "Extraído en: ${destDir.name}", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                launch(Dispatchers.Main) { Toast.makeText(context, "Error al extraer", Toast.LENGTH_SHORT).show() }
+            }
+        }
+    }
