@@ -75,7 +75,6 @@ enum class ViewMode {
     LIST, GRID
 }
 
-// --- VIEWMODEL (Lógica principal ampliada) ---
 class FileManagerViewModel : ViewModel() {
     private val _currentDirectory = MutableStateFlow(Environment.getExternalStorageDirectory())
     val currentDirectory: StateFlow<File> = _currentDirectory
@@ -104,7 +103,6 @@ class FileManagerViewModel : ViewModel() {
     private val _currentCategory = MutableStateFlow(FileCategory.ALL)
     val currentCategory: StateFlow<FileCategory> = _currentCategory
 
-    // NUEVO: Estados para configuración de UI y Apps
     private val _showHiddenFiles = MutableStateFlow(false)
     val showHiddenFiles: StateFlow<Boolean> = _showHiddenFiles
 
@@ -210,7 +208,6 @@ class FileManagerViewModel : ViewModel() {
         }
     }
 
-    // NUEVO: Cargar aplicaciones instaladas
     private fun loadApps(context: Context) {
         viewModelScope.launch(Dispatchers.IO) {
             val pm = context.packageManager
@@ -225,7 +222,6 @@ class FileManagerViewModel : ViewModel() {
         }
     }
 
-    // NUEVO: Extraer APK
     fun extractApp(app: AppItem, context: Context) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -424,7 +420,6 @@ class FileManagerViewModel : ViewModel() {
         _hasClipboardData.value = false
     }
 
-    // NUEVO: Borrado lógico a la papelera o definitivo
     fun deleteSelectedFiles(permanent: Boolean = false) {
         _selectedFiles.value.forEach { file ->
             if (permanent || _currentCategory.value == FileCategory.TRASH) {
@@ -437,7 +432,6 @@ class FileManagerViewModel : ViewModel() {
         if (_currentCategory.value == FileCategory.ALL || _currentCategory.value == FileCategory.TRASH) loadFiles() else setCategory(_currentCategory.value)
     }
     
-    // NUEVO: Restaurar de la papelera
     fun restoreSelectedFiles() {
         val destDir = Environment.getExternalStorageDirectory()
         _selectedFiles.value.forEach { file ->
@@ -539,3 +533,359 @@ class FileManagerViewModel : ViewModel() {
             }
         }
     }
+
+    fun openFile(context: Context, file: File) {
+        try {
+            val intent = Intent(Intent.ACTION_VIEW)
+            val uri = Uri.fromFile(file)
+            val extension = file.extension.lowercase()
+            var mimeType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
+            if (extension == "apk") mimeType = "application/vnd.android.package-archive"
+            
+            intent.setDataAndType(uri, mimeType ?: "*/*")
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            context.startActivity(intent)
+        } catch (e: Exception) {
+            Toast.makeText(context, "No hay aplicación para abrir este archivo", Toast.LENGTH_SHORT).show()
+        }
+    }
+}
+
+@Composable
+fun StorageInfoCard(viewModel: FileManagerViewModel) {
+    val stats by viewModel.storageStats.collectAsState()
+    val isCleaning by viewModel.isCleaningCache.collectAsState()
+    val showHidden by viewModel.showHiddenFiles.collectAsState()
+    val viewMode by viewModel.viewMode.collectAsState()
+    val context = LocalContext.current
+    
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text("Memoria Interna", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+                Row {
+                    IconButton(onClick = { viewModel.toggleViewMode() }) { Text(if (viewMode == ViewMode.LIST) "🔲" else "📄") }
+                    IconButton(onClick = { viewModel.toggleHiddenFiles() }) { Text(if (showHidden) "👁️" else "🙈") }
+                }
+            }
+            LinearProgressIndicator(
+                progress = { stats.percentageUsed },
+                modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)),
+                color = MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.2f)
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Column {
+                    Text("${viewModel.formatSize(stats.freeBytes)} libres de ${viewModel.formatSize(stats.totalBytes)}", style = MaterialTheme.typography.bodySmall)
+                }
+                Button(
+                    onClick = { viewModel.cleanCache(context) },
+                    enabled = !isCleaning,
+                    modifier = Modifier.height(36.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp)
+                ) {
+                    Text(if (isCleaning) "Limpiando..." else "🧹 Caché", style = MaterialTheme.typography.labelMedium)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun CategoryGrid(viewModel: FileManagerViewModel, context: Context) {
+    val currentCategory by viewModel.currentCategory.collectAsState()
+    
+    Row(
+        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(bottom = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        CategoryButton("Carpetas", "📁", currentCategory == FileCategory.ALL) { viewModel.setCategory(FileCategory.ALL) }
+        CategoryButton("Imágenes", "🖼️", currentCategory == FileCategory.IMAGES) { viewModel.setCategory(FileCategory.IMAGES) }
+        CategoryButton("Vídeos", "🎬", currentCategory == FileCategory.VIDEOS) { viewModel.setCategory(FileCategory.VIDEOS) }
+        CategoryButton("Audio", "🎵", currentCategory == FileCategory.AUDIO) { viewModel.setCategory(FileCategory.AUDIO) }
+        CategoryButton("Docs", "📄", currentCategory == FileCategory.DOCUMENTS) { viewModel.setCategory(FileCategory.DOCUMENTS) }
+        CategoryButton("Descargas", "⬇️", currentCategory == FileCategory.DOWNLOADS) { viewModel.setCategory(FileCategory.DOWNLOADS) }
+        CategoryButton("Apps", "📱", currentCategory == FileCategory.APPS) { viewModel.setCategory(FileCategory.APPS, context) }
+        CategoryButton("Papelera", "🗑️", currentCategory == FileCategory.TRASH) { viewModel.setCategory(FileCategory.TRASH) }
+    }
+}
+
+@Composable
+fun CategoryButton(title: String, icon: String, isSelected: Boolean, onClick: () -> Unit) {
+    FilterChip(
+        selected = isSelected,
+        onClick = onClick,
+        label = { Text("$icon $title") },
+        colors = FilterChipDefaults.filterChipColors(selectedContainerColor = MaterialTheme.colorScheme.primaryContainer)
+    )
+}
+
+@Composable
+fun FileListScreen(viewModel: FileManagerViewModel) {
+    val files by viewModel.files.collectAsState()
+    val apps by viewModel.installedApps.collectAsState()
+    val currentDir by viewModel.currentDirectory.collectAsState()
+    val hasClipboardData by viewModel.hasClipboardData.collectAsState()
+    val searchQuery by viewModel.searchQuery.collectAsState()
+    val isSelectionMode by viewModel.isSelectionMode.collectAsState()
+    val selectedFiles by viewModel.selectedFiles.collectAsState()
+    val currentCategory by viewModel.currentCategory.collectAsState()
+    val viewMode by viewModel.viewMode.collectAsState()
+    val context = LocalContext.current 
+    
+    LaunchedEffect(Unit) { viewModel.calculateStorageStats(context) }
+    
+    var showDeleteConfirm by remember { mutableStateOf(false) }
+    var fileToRename by remember { mutableStateOf<File?>(null) }
+    var newFileName by remember { mutableStateOf("") }
+    var showZipDialog by remember { mutableStateOf(false) }
+    var zipFileName by remember { mutableStateOf("") }
+    
+    val isRoot = currentDir?.parentFile == null && currentCategory == FileCategory.ALL
+    
+    BackHandler(enabled = !isRoot || isSelectionMode) { 
+        if (isSelectionMode) viewModel.clearSelection() else viewModel.navigateUp()
+    }
+
+    if (showDeleteConfirm) {
+        val isTrash = currentCategory == FileCategory.TRASH
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = false },
+            title = { Text(if (isTrash) "Eliminación Definitiva" else "Mover a Papelera") },
+            text = { Text(if (isTrash) "¿Eliminar ${selectedFiles.size} elemento(s) para siempre?" else "¿Mover ${selectedFiles.size} elemento(s) a la papelera?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.deleteSelectedFiles()
+                    showDeleteConfirm = false
+                    viewModel.calculateStorageStats(context)
+                }) { Text(if (isTrash) "Destruir" else "Mover", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { showDeleteConfirm = false }) { Text("Cancelar") } }
+        )
+    }
+
+    if (fileToRename != null) {
+        AlertDialog(
+            onDismissRequest = { fileToRename = null },
+            title = { Text("Renombrar archivo") },
+            text = { OutlinedTextField(value = newFileName, onValueChange = { newFileName = it }, singleLine = true) },
+            confirmButton = {
+                TextButton(onClick = {
+                    if (newFileName.isNotBlank()) fileToRename?.let { viewModel.renameFile(it, newFileName) }
+                    fileToRename = null
+                }) { Text("Guardar") }
+            },
+            dismissButton = { TextButton(onClick = { fileToRename = null }) { Text("Cancelar") } }
+        )
+    }
+
+    if (showZipDialog) {
+        AlertDialog(
+            onDismissRequest = { showZipDialog = false },
+            title = { Text("Comprimir archivos") },
+            text = { OutlinedTextField(value = zipFileName, onValueChange = { zipFileName = it }, label = { Text("Nombre .zip") }, singleLine = true) },
+            confirmButton = {
+                TextButton(onClick = {
+                    if (zipFileName.isNotBlank()) {
+                        viewModel.zipSelectedFiles(zipFileName, context)
+                        viewModel.calculateStorageStats(context)
+                    }
+                    showZipDialog = false
+                }) { Text("Comprimir") }
+            },
+            dismissButton = { TextButton(onClick = { showZipDialog = false }) { Text("Cancelar") } }
+        )
+    }
+
+    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+        if (!isSelectionMode) {
+            StorageInfoCard(viewModel)
+            CategoryGrid(viewModel, context)
+            
+            if (currentCategory != FileCategory.APPS) {
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { viewModel.updateSearchQuery(it) },
+                    label = { Text("🔎 Buscar...") },
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                    singleLine = true
+                )
+            }
+            
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Row {
+                    Button(onClick = { viewModel.navigateUp() }, enabled = !isRoot && currentCategory != FileCategory.APPS) { 
+                        Text(if (currentCategory != FileCategory.ALL && currentCategory != FileCategory.TRASH) "⬅ Volver" else "⬆ Subir") 
+                    }
+                    if (currentCategory == FileCategory.ALL) {
+                        TextButton(onClick = { viewModel.goToRoot() }) { Text("Raíz (/)") }
+                    }
+                }
+                
+                if (hasClipboardData && (currentCategory == FileCategory.ALL || currentCategory == FileCategory.TRASH)) {
+                    Row {
+                        Button(onClick = { 
+                            viewModel.pasteFiles()
+                            viewModel.calculateStorageStats(context)
+                        }, modifier = Modifier.padding(end = 8.dp)) { Text("📋 Pegar") }
+                        OutlinedButton(onClick = { viewModel.clearClipboard() }) { Text("❌") }
+                    }
+                }
+            }
+        } else {
+            Card(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+            ) {
+                Column(modifier = Modifier.padding(8.dp)) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Text("${selectedFiles.size} seleccionados", fontWeight = FontWeight.Bold)
+                        Row {
+                            TextButton(onClick = { viewModel.selectAll() }) { Text("Todos") }
+                            TextButton(onClick = { viewModel.clearSelection() }) { Text("Anular") }
+                        }
+                    }
+                    Row(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.SpaceEvenly) {
+                        if (currentCategory == FileCategory.TRASH) {
+                            TextButton(onClick = { viewModel.restoreSelectedFiles() }, enabled = selectedFiles.isNotEmpty()) { Text("Restaurar") }
+                        } else {
+                            TextButton(onClick = { viewModel.copySelectedFiles() }, enabled = selectedFiles.isNotEmpty()) { Text("Copiar") }
+                            TextButton(onClick = { viewModel.cutSelectedFiles() }, enabled = selectedFiles.isNotEmpty()) { Text("Cortar") }
+                            TextButton(onClick = { showZipDialog = true }, enabled = selectedFiles.isNotEmpty()) { Text("ZIP") }
+                        }
+                        TextButton(onClick = { showDeleteConfirm = true }, enabled = selectedFiles.isNotEmpty()) { Text("Borrar") }
+                    }
+                }
+            }
+        }
+        
+        Text(
+            text = if (currentCategory == FileCategory.APPS) "Gestor de Aplicaciones" 
+                   else if (currentCategory == FileCategory.ALL || currentCategory == FileCategory.TRASH) "Ruta: ${currentDir?.absolutePath ?: "/"}" 
+                   else "Categoría: ${currentCategory.name}", 
+            style = MaterialTheme.typography.labelMedium, 
+            modifier = Modifier.padding(vertical = 8.dp)
+        )
+        
+        if (currentCategory == FileCategory.APPS) {
+            LazyColumn {
+                items(apps) { app ->
+                    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("📱", modifier = Modifier.padding(end = 12.dp), style = MaterialTheme.typography.titleLarge)
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(text = app.name, style = MaterialTheme.typography.bodyMedium)
+                            Text(text = app.packageName, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        TextButton(onClick = { viewModel.extractApp(app, context) }) { Text("Extraer APK") }
+                    }
+                    HorizontalDivider()
+                }
+            }
+        } else {
+            if (viewMode == ViewMode.LIST) {
+                LazyColumn {
+                    items(files) { file ->
+                        FileListItem(file, isSelectionMode, selectedFiles.contains(file), viewModel, context, { fileToRename = it; newFileName = it.name })
+                    }
+                }
+            } else {
+                LazyVerticalGrid(columns = GridCells.Fixed(3), modifier = Modifier.fillMaxSize()) {
+                    items(files) { file ->
+                        FileGridItem(file, isSelectionMode, selectedFiles.contains(file), viewModel, context)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun FileListItem(file: File, isSelectionMode: Boolean, isSelected: Boolean, viewModel: FileManagerViewModel, context: Context, onRename: (File) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f) else MaterialTheme.colorScheme.surface)
+            .clickable {
+                if (isSelectionMode) viewModel.toggleFileSelection(file)
+                else if (file.isDirectory) viewModel.openDirectory(file)
+                else if (file.extension.lowercase() == "zip") viewModel.unzipFile(file, context)
+                else viewModel.openFile(context, file)
+            }
+            .padding(vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Checkbox(checked = isSelected, onCheckedChange = { viewModel.toggleFileSelection(file) }, modifier = Modifier.padding(end = 8.dp))
+        val isImage = file.extension.lowercase() in listOf("jpg", "jpeg", "png", "webp", "gif", "bmp")
+        if (isImage) {
+            AsyncImage(model = file, contentDescription = "Miniatura", modifier = Modifier.size(40.dp).padding(end = 12.dp), contentScale = ContentScale.Crop)
+        } else {
+            Text(text = if (file.isDirectory) "📁" else if (file.extension.lowercase() == "zip") "📦" else "📄", modifier = Modifier.padding(end = 12.dp), style = MaterialTheme.typography.titleLarge)
+        }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(text = file.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        if (!isSelectionMode && viewModel.currentCategory.value != FileCategory.TRASH) {
+            IconButton(onClick = { onRename(file) }) { Text("✏️") }
+        }
+    }
+    HorizontalDivider()
+}
+
+@Composable
+fun FileGridItem(file: File, isSelectionMode: Boolean, isSelected: Boolean, viewModel: FileManagerViewModel, context: Context) {
+    Column(
+        modifier = Modifier
+            .padding(4.dp)
+            .background(if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f) else MaterialTheme.colorScheme.surface, RoundedCornerShape(8.dp))
+            .clickable {
+                if (isSelectionMode) viewModel.toggleFileSelection(file)
+                else if (file.isDirectory) viewModel.openDirectory(file)
+                else if (file.extension.lowercase() == "zip") viewModel.unzipFile(file, context)
+                else viewModel.openFile(context, file)
+            }
+            .padding(8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        if (isSelectionMode) {
+            Checkbox(checked = isSelected, onCheckedChange = { viewModel.toggleFileSelection(file) })
+        }
+        val isImage = file.extension.lowercase() in listOf("jpg", "jpeg", "png", "webp", "gif", "bmp")
+        if (isImage) {
+            AsyncImage(model = file, contentDescription = "Miniatura", modifier = Modifier.size(48.dp).padding(bottom = 4.dp), contentScale = ContentScale.Crop)
+        } else {
+            Text(text = if (file.isDirectory) "📁" else if (file.extension.lowercase() == "zip") "📦" else "📄", style = MaterialTheme.typography.headlineMedium, modifier = Modifier.padding(bottom = 4.dp))
+        }
+        Text(text = file.name, style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        
+        val builder = StrictMode.VmPolicy.Builder()
+        StrictMode.setVmPolicy(builder.build())
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (!Environment.isExternalStorageManager()) {
+                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+                intent.data = Uri.parse("package:$packageName")
+                startActivity(intent)
+            }
+        }
+
+        setContent {
+            MaterialTheme {
+                Surface {
+                    val viewModel: FileManagerViewModel = viewModel()
+                    FileListScreen(viewModel = viewModel)
+                }
+            }
+        }
+    }
+}
