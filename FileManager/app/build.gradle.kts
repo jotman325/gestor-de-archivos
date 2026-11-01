@@ -38,22 +38,10 @@ android {
     buildFeatures {
         compose = true
     }
-}
 
-dependencies {
-    implementation("org.apache.ftpserver:ftpserver-core:1.1.2")
-    implementation("io.coil-kt:coil-compose:2.6.0")
-    implementation(libs.androidx.core.ktx)
-    implementation(libs.androidx.lifecycle.runtime.ktx)
-    implementation(libs.androidx.lifecycle.viewmodel.compose)
-    implementation(libs.androidx.activity.compose)
-
-    implementation(platform(libs.androidx.compose.bom))
-    implementation(libs.androidx.ui)
-    implementation(libs.androidx.ui.graphics)
-    implementation(libs.androidx.ui.tooling.preview)
-    implementation(libs.androidx.material3)
-    implementation(libs.androidx.material.icons.extended)
-
-    debugImplementation(libs.androidx.ui.tooling)
+    packaging {
+        resources {
+            excludes += "META-INF/DEPENDENCIES"
+        }
+    }
 }
