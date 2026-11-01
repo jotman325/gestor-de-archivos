@@ -630,20 +630,29 @@ class FileManagerViewModel : ViewModel() {
     }
 
     fun openFile(context: Context, file: File) {
-        try {
-            val intent = Intent(Intent.ACTION_VIEW)
-            val uri = Uri.fromFile(file)
-            val extension = file.extension.lowercase()
-            var mimeType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
-            if (extension == "apk") mimeType = "application/vnd.android.package-archive"
-            
-            intent.setDataAndType(uri, mimeType ?: "*/*")
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            context.startActivity(intent)
-        } catch (e: Exception) {
-            Toast.makeText(context, "No hay aplicación para abrir este archivo", Toast.LENGTH_SHORT).show()
+    try {
+        val intent = Intent(Intent.ACTION_VIEW)
+        
+        // Generar una URI segura de tipo 'content://' usando FileProvider
+        val uri = FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.provider",
+            file
+        )
+        
+        val extension = file.extension.lowercase()
+        var mimeType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
+        if (extension == "apk") {
+            mimeType = "application/vnd.android.package-archive"
         }
+        
+        intent.setDataAndType(uri, mimeType ?: "*/*")
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        
+        context.startActivity(intent)
+    } catch (e: Exception) {
+        Toast.makeText(context, "No hay aplicación para abrir este archivo: ${e.message}", Toast.LENGTH_LONG).show()
     }
 }
 
