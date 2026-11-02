@@ -39,18 +39,23 @@ android {
         compose = true
     }
 
+    // Bloque indispensable para evitar que el FTP Server rompa el empaquetado
     packaging {
         resources {
             excludes += "META-INF/DEPENDENCIES"
+            excludes += "META-INF/LICENSE"
+            excludes += "META-INF/LICENSE.txt"
+            excludes += "META-INF/NOTICE"
+            excludes += "META-INF/NOTICE.txt"
         }
     }
 }
 
 dependencies {
-    // Librerías externas añadidas
+    // Librerías externas
     implementation("io.coil-kt:coil-compose:2.6.0")
     implementation("org.apache.ftpserver:ftpserver-core:1.1.2")
-    
+
     // Librerías base del sistema Android
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
