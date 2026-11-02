@@ -1,6 +1,5 @@
 package com.example.filemanager
 
-import androidx.core.content.FileProvider
 import android.app.usage.StorageStatsManager
 import android.content.Context
 import android.content.Intent
@@ -20,18 +19,16 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -43,12 +40,15 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
-import androidx.lifecycle.viewModelScope
 import org.apache.ftpserver.FtpServer
 import org.apache.ftpserver.FtpServerFactory
 import org.apache.ftpserver.listener.ListenerFactory
@@ -123,7 +123,6 @@ class FileManagerViewModel : ViewModel() {
     private val _isCleaningCache = MutableStateFlow(false)
     val isCleaningCache: StateFlow<Boolean> = _isCleaningCache
 
-    // Estados del Servidor FTP
     private val _isFtpRunning = MutableStateFlow(false)
     val isFtpRunning: StateFlow<Boolean> = _isFtpRunning
 
@@ -140,7 +139,6 @@ class FileManagerViewModel : ViewModel() {
         loadFiles()
     }
 
-    // --- FUNCIONES DEL SERVIDOR FTP ---
     fun toggleFtpServer(context: Context) {
         if (_isFtpRunning.value) {
             stopFtpServer()
@@ -215,7 +213,6 @@ class FileManagerViewModel : ViewModel() {
         }
     }
 
-    // --- RESTO DE FUNCIONES (Lógica principal ampliada) ---
     fun toggleHiddenFiles() {
         _showHiddenFiles.value = !_showHiddenFiles.value
         if (_currentCategory.value == FileCategory.ALL || _currentCategory.value == FileCategory.TRASH) {
@@ -352,9 +349,7 @@ class FileManagerViewModel : ViewModel() {
             FileCategory.APPS -> {
                 if (context != null) loadApps(context)
             }
-            FileCategory.FTP_SERVER -> {
-                // No carga archivos, solo cambia la vista
-            }
+            FileCategory.FTP_SERVER -> {}
             else -> scanAllFilesByCategory(category)
         }
     }
@@ -631,29 +626,49 @@ class FileManagerViewModel : ViewModel() {
     }
 
     fun openFile(context: Context, file: File) {
-    try {
-        val intent = Intent(Intent.ACTION_VIEW)
-        
-        // Generar una URI segura de tipo 'content://' usando FileProvider
-        val uri = FileProvider.getUriForFile(
-            context,
-            "${context.packageName}.provider",
-            file
-        )
-        
-        val extension = file.extension.lowercase()
-        var mimeType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
-        if (extension == "apk") {
-            mimeType = "application/vnd.android.package-archive"
+        try {
+            if (!file.exists()) {
+                Toast.makeText(context, "El archivo no existe", Toast.LENGTH_SHORT).show()
+                return
+            }
+
+            val extension = file.extension.lowercase()
+
+            // Manejo de permisos para instalar APKs en Android 8.0+ (API 26)
+            if (extension == "apk" && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                if (!context.packageManager.canRequestPackageInstalls()) {
+                    val installIntent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+                        data = Uri.parse("package:${context.packageName}")
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    context.startActivity(installIntent)
+                    Toast.makeText(context, "Permite la instalación de aplicaciones desconocidas", Toast.LENGTH_LONG).show()
+                    return
+                }
+            }
+
+            // Generar URI segura 'content://' mediante FileProvider
+            val uri = FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.provider",
+                file
+            )
+
+            var mimeType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
+            if (extension == "apk") {
+                mimeType = "application/vnd.android.package-archive"
+            }
+
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, mimeType ?: "*/*")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+
+            context.startActivity(intent)
+        } catch (e: Exception) {
+            Toast.makeText(context, "No hay aplicación para abrir este archivo: ${e.message}", Toast.LENGTH_LONG).show()
         }
-        
-        intent.setDataAndType(uri, mimeType ?: "*/*")
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        
-        context.startActivity(intent)
-    } catch (e: Exception) {
-        Toast.makeText(context, "No hay aplicación para abrir este archivo: ${e.message}", Toast.LENGTH_LONG).show()
     }
 }
 
