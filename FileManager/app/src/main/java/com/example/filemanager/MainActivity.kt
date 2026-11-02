@@ -161,43 +161,56 @@ class FileManagerViewModel : ViewModel() {
     }
 
     private fun startFtpServer(context: Context) {
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val serverFactory = FtpServerFactory()
-                val factory = ListenerFactory()
-                factory.port = 2121 
-                serverFactory.addListener("default", factory.createListener())
+    viewModelScope.launch(Dispatchers.IO) {
+        try {
+            // Detener servidor previo si continuaba abierto
+            ftpServer?.stop()
+            ftpServer = null
 
-                val userManagerFactory = PropertiesUserManagerFactory()
-                val userManager = userManagerFactory.createUserManager()
-
-                val user = BaseUser()
-                user.name = "admin"
-                user.password = "1234"
-                user.homeDirectory = Environment.getExternalStorageDirectory().absolutePath
-                
-                val authorities = listOf(WritePermission())
-                user.authorities = authorities
-
-                userManager.save(user)
-                serverFactory.userManager = userManager
-
-                ftpServer = serverFactory.createServer()
-                ftpServer?.start()
-
-                val ipAddress = getLocalIpAddress(context)
-                
+            val ipAddress = getLocalIpAddress(context)
+            if (ipAddress == "0.0.0.0" || ipAddress.isEmpty()) {
                 launch(Dispatchers.Main) {
-                    _ftpAddress.value = "ftp://$ipAddress:2121"
-                    _isFtpRunning.value = true
+                    Toast.makeText(context, "Conéctate a una red WiFi primero", Toast.LENGTH_LONG).show()
                 }
-            } catch (e: Exception) {
-                launch(Dispatchers.Main) {
-                    Toast.makeText(context, "Error al iniciar servidor FTP", Toast.LENGTH_SHORT).show()
-                }
+                return@launch
+            }
+
+            val serverFactory = FtpServerFactory()
+            val factory = ListenerFactory()
+            factory.port = 2121 
+            serverFactory.addListener("default", factory.createListener())
+
+            val userManagerFactory = PropertiesUserManagerFactory()
+            val userManager = userManagerFactory.createUserManager()
+
+            val user = BaseUser()
+            user.name = "admin"
+            user.password = "1234"
+            user.homeDirectory = Environment.getExternalStorageDirectory().absolutePath
+            
+            val authorities = listOf(WritePermission())
+            user.authorities = authorities
+
+            userManager.save(user)
+            serverFactory.userManager = userManager
+
+            ftpServer = serverFactory.createServer()
+            ftpServer?.start()
+
+            launch(Dispatchers.Main) {
+                _ftpAddress.value = "ftp://$ipAddress:2121"
+                _isFtpRunning.value = true
+                Toast.makeText(context, "Servidor FTP iniciado", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            launch(Dispatchers.Main) {
+                _isFtpRunning.value = false
+                Toast.makeText(context, "Error al iniciar FTP: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
             }
         }
     }
+}
 
     private fun stopFtpServer() {
         viewModelScope.launch(Dispatchers.IO) {
