@@ -1,30 +1,3 @@
-Para adaptar la aplicación a las dos capturas de pantalla que has compartido, se realizaron las siguientes modificaciones principales en `MainActivity.kt`:
-
-1. **Menú de tres puntos (Menú desplegable en la barra superior):**
-* Se añade un menú flotante en la esquina superior derecha (`DropdownMenu`) al pulsar el icono de tres puntos `⋮`.
-* Incluye las opciones de:
-* **Tipos de vista:** Cambiar entre Cuadrícula y Lista (con indicador visual de selección `✓`).
-* **Ordenar:** Por Fecha, Nombre, Tamaño, etc.
-* **Mostrar/Ocultar archivos ocultos.**
-* **Crear carpeta nueva:** Abre un cuadro de diálogo para introducir el nombre de la carpeta e integrarla inmediatamente.
-
-
-
-
-2. **Nuevo sistema de búsqueda (Pantalla completa estilo segunda foto):**
-* Al pulsar el icono de la lupa `🔍` en la barra superior, no se abre un campo flotante simple, sino una pantalla/modo dedicado a la búsqueda.
-* Incluye el campo superior con el icono de flecha `←` para salir y el campo de texto `"Buscar archivos"`.
-* Incorpora sugerencias visuales por categorías (Documentos, Imágenes, Vídeos, Música, Archivos, APKs, Carpeta) y por ubicaciones/aplicaciones habituales (Cámara, Transferencias y descargas, Capturas de pantalla, Telegram, Grabadora). Al pulsar cualquiera de estas etiquetas se filtra directamente el contenido.
-
-
-
----
-
-### Código actualizado para `MainActivity.kt`
-
-Reemplaza todo el contenido de `MainActivity.kt` con el siguiente código:
-
-```kotlin
 package com.example.filemanager
 
 import android.app.usage.StorageStatsManager
@@ -2146,5 +2119,3 @@ class MainActivity : ComponentActivity() {
         }
     }
 }
-
-```
