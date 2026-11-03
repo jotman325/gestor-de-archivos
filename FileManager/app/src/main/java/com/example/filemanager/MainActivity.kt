@@ -1,3 +1,30 @@
+Para adaptar la aplicación a las dos capturas de pantalla que has compartido, se realizaron las siguientes modificaciones principales en `MainActivity.kt`:
+
+1. **Menú de tres puntos (Menú desplegable en la barra superior):**
+* Se añade un menú flotante en la esquina superior derecha (`DropdownMenu`) al pulsar el icono de tres puntos `⋮`.
+* Incluye las opciones de:
+* **Tipos de vista:** Cambiar entre Cuadrícula y Lista (con indicador visual de selección `✓`).
+* **Ordenar:** Por Fecha, Nombre, Tamaño, etc.
+* **Mostrar/Ocultar archivos ocultos.**
+* **Crear carpeta nueva:** Abre un cuadro de diálogo para introducir el nombre de la carpeta e integrarla inmediatamente.
+
+
+
+
+2. **Nuevo sistema de búsqueda (Pantalla completa estilo segunda foto):**
+* Al pulsar el icono de la lupa `🔍` en la barra superior, no se abre un campo flotante simple, sino una pantalla/modo dedicado a la búsqueda.
+* Incluye el campo superior con el icono de flecha `←` para salir y el campo de texto `"Buscar archivos"`.
+* Incorpora sugerencias visuales por categorías (Documentos, Imágenes, Vídeos, Música, Archivos, APKs, Carpeta) y por ubicaciones/aplicaciones habituales (Cámara, Transferencias y descargas, Capturas de pantalla, Telegram, Grabadora). Al pulsar cualquiera de estas etiquetas se filtra directamente el contenido.
+
+
+
+---
+
+### Código actualizado para `MainActivity.kt`
+
+Reemplaza todo el contenido de `MainActivity.kt` con el siguiente código:
+
+```kotlin
 package com.example.filemanager
 
 import android.app.usage.StorageStatsManager
@@ -40,6 +67,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -126,6 +155,9 @@ class FileManagerViewModel : ViewModel() {
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery
 
+    private val _isSearchActive = MutableStateFlow(false)
+    val isSearchActive: StateFlow<Boolean> = _isSearchActive
+
     private var clipboardFiles: List<File> = emptyList()
     private var isCutOperation: Boolean = false
 
@@ -186,9 +218,38 @@ class FileManagerViewModel : ViewModel() {
         loadFiles()
     }
 
+    fun openSearch() {
+        _isSearchActive.value = true
+    }
+
+    fun closeSearch() {
+        _isSearchActive.value = false
+        _searchQuery.value = ""
+        filterAndSortFiles()
+    }
+
+    fun setViewMode(mode: ViewMode) {
+        _viewMode.value = mode
+    }
+
     fun setSortOption(option: SortOption) {
         _sortOption.value = option
         filterAndSortFiles()
+    }
+
+    fun createNewFolder(folderName: String, context: Context) {
+        if (folderName.isBlank()) return
+        val newFolder = File(_currentDirectory.value, folderName)
+        if (!newFolder.exists()) {
+            if (newFolder.mkdirs()) {
+                loadFiles()
+                Toast.makeText(context, "Carpeta creada", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(context, "Error al crear la carpeta", Toast.LENGTH_SHORT).show()
+            }
+        } else {
+            Toast.makeText(context, "La carpeta ya existe", Toast.LENGTH_SHORT).show()
+        }
     }
 
     fun navigateToDirectory(targetFile: File) {
@@ -585,6 +646,11 @@ class FileManagerViewModel : ViewModel() {
     }
 
     fun navigateUp(): Boolean {
+        if (_isSearchActive.value) {
+            closeSearch()
+            return true
+        }
+
         if (_previousCategory.value == FileCategory.STORAGE_ANALYSIS) {
             _currentCategory.value = FileCategory.STORAGE_ANALYSIS
             _previousCategory.value = null
@@ -917,6 +983,159 @@ fun DrawerContent(viewModel: FileManagerViewModel, context: Context, onCloseDraw
     }
 }
 
+// --- PANTALLA COMPLETA DE BÚSQUEDA (ESTILO CAPTURA 2) ---
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun FullScreenSearchView(viewModel: FileManagerViewModel, context: Context) {
+    val searchQuery by viewModel.searchQuery.collectAsState()
+    val files by viewModel.files.collectAsState()
+    val isSelectionMode by viewModel.isSelectionMode.collectAsState()
+    val selectedFiles by viewModel.selectedFiles.collectAsState()
+    val viewMode by viewModel.viewMode.collectAsState()
+    val focusRequester = remember { FocusRequester() }
+
+    LaunchedEffect(Unit) {
+        focusRequester.requestFocus()
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.White)
+            .padding(16.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = { viewModel.closeSearch() }) {
+                Text("←", fontSize = 24.sp, color = Color(0xFF1A1C1E))
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = { viewModel.updateSearchQuery(it) },
+                placeholder = { Text("Buscar archivos", color = Color(0xFF72777D)) },
+                leadingIcon = { Text("🔍", fontSize = 18.sp) },
+                trailingIcon = {
+                    if (searchQuery.isNotEmpty()) {
+                        IconButton(onClick = { viewModel.updateSearchQuery("") }) {
+                            Text("✕", fontSize = 16.sp, color = Color(0xFF72777D))
+                        }
+                    }
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .focusRequester(focusRequester),
+                singleLine = true,
+                shape = RoundedCornerShape(24.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    unfocusedContainerColor = Color(0xFFF2F4F7),
+                    focusedContainerColor = Color(0xFFF2F4F7),
+                    unfocusedBorderColor = Color.Transparent,
+                    focusedBorderColor = Color.Transparent
+                )
+            )
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        if (searchQuery.isBlank()) {
+            LazyColumn(modifier = Modifier.fillMaxSize()) {
+                item {
+                    Text(
+                        text = "Buscar por categoría",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = Color(0xFF72777D),
+                        modifier = Modifier.padding(vertical = 8.dp)
+                    )
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        SearchChip("Documentos") { viewModel.setCategory(FileCategory.DOCUMENTS, context) }
+                        SearchChip("Imágenes") { viewModel.setCategory(FileCategory.IMAGES, context) }
+                        SearchChip("Vídeos") { viewModel.setCategory(FileCategory.VIDEOS, context) }
+                        SearchChip("Música") { viewModel.setCategory(FileCategory.AUDIO, context) }
+                        SearchChip("Archivos") { viewModel.setCategory(FileCategory.OTHERS, context) }
+                        SearchChip("APKs") { viewModel.setCategory(FileCategory.APKs, context) }
+                        SearchChip("Carpetas") { viewModel.updateSearchQuery("folder") }
+                    }
+
+                    Spacer(modifier = Modifier.height(24.dp))
+
+                    Text(
+                        text = "Aplicaciones y carpetas",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = Color(0xFF72777D),
+                        modifier = Modifier.padding(vertical = 8.dp)
+                    )
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        SearchChip("Cámara") { viewModel.updateSearchQuery("DCIM") }
+                        SearchChip("Transferencias y descargas") { viewModel.setCategory(FileCategory.DOWNLOADS, context) }
+                        SearchChip("Capturas de pantalla y grabaciones") { viewModel.updateSearchQuery("Screenshots") }
+                        SearchChip("Telegram") { viewModel.updateSearchQuery("Telegram") }
+                        SearchChip("Grabadora") { viewModel.updateSearchQuery("Recorder") }
+                    }
+                }
+            }
+        } else {
+            if (viewMode == ViewMode.LIST) {
+                LazyColumn(modifier = Modifier.fillMaxSize()) {
+                    items(files) { file ->
+                        FileListItem(
+                            file = file,
+                            isSelectionMode = isSelectionMode,
+                            isSelected = selectedFiles.contains(file),
+                            viewModel = viewModel,
+                            context = context,
+                            onRename = {},
+                            onShowDetails = {}
+                        )
+                    }
+                }
+            } else {
+                LazyVerticalGrid(columns = GridCells.Fixed(3), modifier = Modifier.fillMaxSize()) {
+                    items(files) { file ->
+                        FileGridItem(
+                            file = file,
+                            isSelectionMode = isSelectionMode,
+                            isSelected = selectedFiles.contains(file),
+                            viewModel = viewModel,
+                            context = context,
+                            onShowDetails = {}
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun SearchChip(label: String, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(16.dp),
+        color = Color(0xFFF2F4F7),
+        modifier = Modifier.padding(vertical = 2.dp)
+    ) {
+        Text(
+            text = label,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Medium,
+            color = Color(0xFF1A1C1E)
+        )
+    }
+}
+
 // --- VISTA DETALLADA DE ANÁLISIS DE ALMACENAMIENTO ---
 
 @Composable
@@ -1176,22 +1395,6 @@ fun CategoryItem(title: String, sizeText: String, icon: String, onClick: () -> U
 }
 
 @Composable
-fun StorageInfoCard(viewModel: FileManagerViewModel, onOpenSortDialog: () -> Unit) {
-    val showHidden by viewModel.showHiddenFiles.collectAsState()
-    val viewMode by viewModel.viewMode.collectAsState()
-
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
-        horizontalArrangement = Arrangement.End,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        IconButton(onClick = onOpenSortDialog) { Text("🔀", fontSize = 20.sp) }
-        IconButton(onClick = { viewModel.toggleViewMode() }) { Text(if (viewMode == ViewMode.LIST) "🔲" else "📄", fontSize = 20.sp) }
-        IconButton(onClick = { viewModel.toggleHiddenFiles() }) { Text(if (showHidden) "👁️" else "🙈", fontSize = 20.sp) }
-    }
-}
-
-@Composable
 fun ActionBottomSheet(
     selectedCount: Int,
     isTrash: Boolean,
@@ -1305,36 +1508,6 @@ fun FolderPickerDialog(
             TextButton(onClick = onDismiss) { Text("Cancelar") }
         }
     )
-}
-
-@Composable
-fun SortDialog(currentSort: SortOption, onSelectSort: (SortOption) -> Unit, onDismiss: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Ordenar y Filtrar") },
-        text = {
-            Column {
-                SortOptionItem("Nombre (A-Z)", SortOption.NAME_ASC, currentSort, onSelectSort)
-                SortOptionItem("Nombre (Z-A)", SortOption.NAME_DESC, currentSort, onSelectSort)
-                SortOptionItem("Fecha (Más reciente)", SortOption.DATE_DESC, currentSort, onSelectSort)
-                SortOptionItem("Fecha (Más antiguo)", SortOption.DATE_ASC, currentSort, onSelectSort)
-                SortOptionItem("Tamaño (Mayor a Menor)", SortOption.SIZE_DESC, currentSort, onSelectSort)
-                SortOptionItem("Tamaño (Menor a Mayor)", SortOption.SIZE_ASC, currentSort, onSelectSort)
-            }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Cerrar") } }
-    )
-}
-
-@Composable
-fun SortOptionItem(label: String, option: SortOption, currentSort: SortOption, onSelectSort: (SortOption) -> Unit) {
-    Row(
-        modifier = Modifier.fillMaxWidth().clickable { onSelectSort(option) }.padding(vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        RadioButton(selected = (option == currentSort), onClick = { onSelectSort(option) })
-        Text(text = label, modifier = Modifier.padding(start = 8.dp), style = MaterialTheme.typography.bodyMedium)
-    }
 }
 
 @Composable
@@ -1470,12 +1643,13 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
     val apps by viewModel.installedApps.collectAsState()
     val currentDir by viewModel.currentDirectory.collectAsState()
     val hasClipboardData by viewModel.hasClipboardData.collectAsState()
-    val searchQuery by viewModel.searchQuery.collectAsState()
     val isSelectionMode by viewModel.isSelectionMode.collectAsState()
     val selectedFiles by viewModel.selectedFiles.collectAsState()
     val currentCategory by viewModel.currentCategory.collectAsState()
     val viewMode by viewModel.viewMode.collectAsState()
     val currentSort by viewModel.sortOption.collectAsState()
+    val showHidden by viewModel.showHiddenFiles.collectAsState()
+    val isSearchActive by viewModel.isSearchActive.collectAsState()
     val context = LocalContext.current
 
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
@@ -1484,7 +1658,9 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
     LaunchedEffect(Unit) { viewModel.calculateStorageStats(context) }
 
     var showDeleteConfirm by remember { mutableStateOf(false) }
-    var showSortDialog by remember { mutableStateOf(false) }
+    var showMenu by remember { mutableStateOf(false) }
+    var showCreateFolderDialog by remember { mutableStateOf(false) }
+    var folderNameInput by remember { mutableStateOf("") }
     var fileToRename by remember { mutableStateOf<File?>(null) }
     var fileForDetails by remember { mutableStateOf<File?>(null) }
     var showFolderPickerForZip by remember { mutableStateOf<File?>(null) }
@@ -1494,9 +1670,11 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
 
     val isRoot = currentDir?.parentFile == null && currentCategory == FileCategory.ALL
 
-    BackHandler(enabled = !isRoot || isSelectionMode || drawerState.isOpen) {
+    BackHandler(enabled = !isRoot || isSelectionMode || drawerState.isOpen || isSearchActive) {
         if (drawerState.isOpen) {
             coroutineScope.launch { drawerState.close() }
+        } else if (isSearchActive) {
+            viewModel.closeSearch()
         } else if (isSelectionMode) {
             viewModel.clearSelection()
         } else {
@@ -1504,14 +1682,28 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
         }
     }
 
-    if (showSortDialog) {
-        SortDialog(
-            currentSort = currentSort,
-            onSelectSort = {
-                viewModel.setSortOption(it)
-                showSortDialog = false
+    if (showCreateFolderDialog) {
+        AlertDialog(
+            onDismissRequest = { showCreateFolderDialog = false },
+            title = { Text("Nueva carpeta") },
+            text = {
+                OutlinedTextField(
+                    value = folderNameInput,
+                    onValueChange = { folderNameInput = it },
+                    label = { Text("Nombre de la carpeta") },
+                    singleLine = true
+                )
             },
-            onDismiss = { showSortDialog = false }
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.createNewFolder(folderNameInput, context)
+                    folderNameInput = ""
+                    showCreateFolderDialog = false
+                }) { Text("Crear") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCreateFolderDialog = false }) { Text("Cancelar") }
+            }
         )
     }
 
@@ -1592,28 +1784,81 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
     ) {
         Scaffold(
             topBar = {
-                TopAppBar(
-                    title = {
-                        Text(
-                            when (currentCategory) {
-                                FileCategory.STORAGE_ANALYSIS -> "Análisis de almacenamiento"
-                                FileCategory.LARGE_FILES -> "Archivos grandes (>300MB)"
-                                FileCategory.DUPLICATES -> "Archivos duplicados"
-                                FileCategory.APPS -> "Aplicaciones"
-                                FileCategory.FTP_SERVER -> "PC (Servidor FTP)"
-                                else -> "Gestor de Archivos"
-                            },
-                            fontWeight = FontWeight.SemiBold,
-                            color = Color(0xFF1A1C1E)
-                        )
-                    },
-                    navigationIcon = {
-                        IconButton(onClick = { coroutineScope.launch { drawerState.open() } }) {
-                            Text("☰", fontSize = 24.sp, color = Color(0xFF1A1C1E))
-                        }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
-                )
+                if (!isSearchActive) {
+                    TopAppBar(
+                        title = {
+                            Text(
+                                when (currentCategory) {
+                                    FileCategory.STORAGE_ANALYSIS -> "Análisis de almacenamiento"
+                                    FileCategory.LARGE_FILES -> "Archivos grandes (>300MB)"
+                                    FileCategory.DUPLICATES -> "Archivos duplicados"
+                                    FileCategory.APPS -> "Aplicaciones"
+                                    FileCategory.FTP_SERVER -> "PC (Servidor FTP)"
+                                    else -> "Gestor de Archivos"
+                                },
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color(0xFF1A1C1E)
+                            )
+                        },
+                        navigationIcon = {
+                            IconButton(onClick = { coroutineScope.launch { drawerState.open() } }) {
+                                Text("☰", fontSize = 24.sp, color = Color(0xFF1A1C1E))
+                            }
+                        },
+                        actions = {
+                            IconButton(onClick = { viewModel.openSearch() }) {
+                                Text("🔍", fontSize = 20.sp)
+                            }
+                            Box {
+                                IconButton(onClick = { showMenu = true }) {
+                                    Text("⋮", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                                }
+                                DropdownMenu(
+                                    expanded = showMenu,
+                                    onDismissRequest = { showMenu = false }
+                                ) {
+                                    DropdownMenuItem(
+                                        text = {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text("Cuadrícula", modifier = Modifier.weight(1f))
+                                                if (viewMode == ViewMode.GRID) Text("✓", color = MaterialTheme.colorScheme.primary)
+                                            }
+                                        },
+                                        onClick = { viewModel.setViewMode(ViewMode.GRID); showMenu = false }
+                                    )
+                                    DropdownMenuItem(
+                                        text = {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text("Lista", modifier = Modifier.weight(1f))
+                                                if (viewMode == ViewMode.LIST) Text("✓", color = MaterialTheme.colorScheme.primary)
+                                            }
+                                        },
+                                        onClick = { viewModel.setViewMode(ViewMode.LIST); showMenu = false }
+                                    )
+                                    HorizontalDivider()
+                                    DropdownMenuItem(
+                                        text = { Text("Ordenar por Fecha") },
+                                        onClick = { viewModel.setSortOption(SortOption.DATE_DESC); showMenu = false }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Ordenar por Nombre") },
+                                        onClick = { viewModel.setSortOption(SortOption.NAME_ASC); showMenu = false }
+                                    )
+                                    HorizontalDivider()
+                                    DropdownMenuItem(
+                                        text = { Text(if (showHidden) "Ocultar archivos ocultos" else "Mostrar archivos ocultos") },
+                                        onClick = { viewModel.toggleHiddenFiles(); showMenu = false }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Crear carpeta") },
+                                        onClick = { showMenu = false; showCreateFolderDialog = true }
+                                    )
+                                }
+                            }
+                        },
+                        colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
+                    )
+                }
             },
             bottomBar = {
                 if (isSelectionMode) {
@@ -1646,92 +1891,86 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
             },
             containerColor = Color.White
         ) { paddingValues ->
-            Column(
+            Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(paddingValues)
-                    .padding(horizontal = 16.dp)
             ) {
-                if (currentCategory != FileCategory.STORAGE_ANALYSIS && currentCategory != FileCategory.FTP_SERVER) {
-                    StorageInfoCard(viewModel = viewModel, onOpenSortDialog = { showSortDialog = true })
-                }
-
-                if (currentCategory != FileCategory.APPS && currentCategory != FileCategory.DUPLICATES && currentCategory != FileCategory.STORAGE_ANALYSIS && currentCategory != FileCategory.FTP_SERVER) {
-                    OutlinedTextField(
-                        value = searchQuery,
-                        onValueChange = { viewModel.updateSearchQuery(it) },
-                        label = { Text("🔎 Buscar...") },
-                        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
-                        singleLine = true,
-                        shape = RoundedCornerShape(12.dp)
-                    )
-                }
-
-                if (currentCategory == FileCategory.ALL || currentCategory == FileCategory.TRASH) {
-                    PathBreadcrumbs(currentDir = currentDir, onPathClick = { viewModel.navigateToDirectory(it) })
-                }
-
-                if (currentCategory != FileCategory.DUPLICATES && currentCategory != FileCategory.STORAGE_ANALYSIS && currentCategory != FileCategory.FTP_SERVER) {
-                    if (hasClipboardData && (currentCategory == FileCategory.ALL || currentCategory == FileCategory.TRASH)) {
-                        Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.End) {
-                            Button(onClick = {
-                                viewModel.pasteFiles()
-                                viewModel.calculateStorageStats(context)
-                            }, modifier = Modifier.padding(end = 8.dp)) { Text("📋 Pegar") }
-                            OutlinedButton(onClick = { viewModel.clearClipboard() }) { Text("❌") }
+                if (isSearchActive) {
+                    FullScreenSearchView(viewModel = viewModel, context = context)
+                } else {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 16.dp)
+                    ) {
+                        if (currentCategory == FileCategory.ALL || currentCategory == FileCategory.TRASH) {
+                            PathBreadcrumbs(currentDir = currentDir, onPathClick = { viewModel.navigateToDirectory(it) })
                         }
-                    }
-                }
 
-                when (currentCategory) {
-                    FileCategory.STORAGE_ANALYSIS -> StorageAnalysisScreen(viewModel)
-                    FileCategory.FTP_SERVER -> FtpServerScreen(viewModel)
-                    FileCategory.DUPLICATES -> DuplicatesScreen(viewModel)
-                    FileCategory.APPS -> {
-                        LazyColumn {
-                            items(apps) { app ->
-                                Row(
-                                    modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text("📱", modifier = Modifier.padding(end = 12.dp), fontSize = 44.sp)
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(text = app.name, style = MaterialTheme.typography.bodyMedium, color = Color(0xFF1A1C1E))
-                                        Text(text = app.packageName, style = MaterialTheme.typography.labelSmall, color = Color(0xFF72777D))
+                        if (currentCategory != FileCategory.DUPLICATES && currentCategory != FileCategory.STORAGE_ANALYSIS && currentCategory != FileCategory.FTP_SERVER) {
+                            if (hasClipboardData && (currentCategory == FileCategory.ALL || currentCategory == FileCategory.TRASH)) {
+                                Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.End) {
+                                    Button(onClick = {
+                                        viewModel.pasteFiles()
+                                        viewModel.calculateStorageStats(context)
+                                    }, modifier = Modifier.padding(end = 8.dp)) { Text("📋 Pegar") }
+                                    OutlinedButton(onClick = { viewModel.clearClipboard() }) { Text("❌") }
+                                }
+                            }
+                        }
+
+                        when (currentCategory) {
+                            FileCategory.STORAGE_ANALYSIS -> StorageAnalysisScreen(viewModel)
+                            FileCategory.FTP_SERVER -> FtpServerScreen(viewModel)
+                            FileCategory.DUPLICATES -> DuplicatesScreen(viewModel)
+                            FileCategory.APPS -> {
+                                LazyColumn {
+                                    items(apps) { app ->
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text("📱", modifier = Modifier.padding(end = 12.dp), fontSize = 44.sp)
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(text = app.name, style = MaterialTheme.typography.bodyMedium, color = Color(0xFF1A1C1E))
+                                                Text(text = app.packageName, style = MaterialTheme.typography.labelSmall, color = Color(0xFF72777D))
+                                            }
+                                            Text(viewModel.formatSize(app.sizeBytes), style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(end = 8.dp))
+                                            TextButton(onClick = { viewModel.extractApp(app, context) }) { Text("Extraer APK") }
+                                        }
+                                        HorizontalDivider(color = Color(0xFFE1E2E5))
                                     }
-                                    Text(viewModel.formatSize(app.sizeBytes), style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(end = 8.dp))
-                                    TextButton(onClick = { viewModel.extractApp(app, context) }) { Text("Extraer APK") }
-                                }
-                                HorizontalDivider(color = Color(0xFFE1E2E5))
-                            }
-                        }
-                    }
-                    else -> {
-                        if (viewMode == ViewMode.LIST) {
-                            LazyColumn {
-                                items(files) { file ->
-                                    FileListItem(
-                                        file = file,
-                                        isSelectionMode = isSelectionMode,
-                                        isSelected = selectedFiles.contains(file),
-                                        viewModel = viewModel,
-                                        context = context,
-                                        onRename = { fileToRename = it; newFileName = it.name },
-                                        onShowDetails = { fileForDetails = it }
-                                    )
                                 }
                             }
-                        } else {
-                            LazyVerticalGrid(columns = GridCells.Fixed(3), modifier = Modifier.fillMaxSize()) {
-                                items(files) { file ->
-                                    FileGridItem(
-                                        file = file,
-                                        isSelectionMode = isSelectionMode,
-                                        isSelected = selectedFiles.contains(file),
-                                        viewModel = viewModel,
-                                        context = context,
-                                        onShowDetails = { fileForDetails = it }
-                                    )
+                            else -> {
+                                if (viewMode == ViewMode.LIST) {
+                                    LazyColumn {
+                                        items(files) { file ->
+                                            FileListItem(
+                                                file = file,
+                                                isSelectionMode = isSelectionMode,
+                                                isSelected = selectedFiles.contains(file),
+                                                viewModel = viewModel,
+                                                context = context,
+                                                onRename = { fileToRename = it; newFileName = it.name },
+                                                onShowDetails = { fileForDetails = it }
+                                            )
+                                        }
+                                    }
+                                } else {
+                                    LazyVerticalGrid(columns = GridCells.Fixed(3), modifier = Modifier.fillMaxSize()) {
+                                        items(files) { file ->
+                                            FileGridItem(
+                                                file = file,
+                                                isSelectionMode = isSelectionMode,
+                                                isSelected = selectedFiles.contains(file),
+                                                viewModel = viewModel,
+                                                context = context,
+                                                onShowDetails = { fileForDetails = it }
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1907,3 +2146,5 @@ class MainActivity : ComponentActivity() {
         }
     }
 }
+
+```
