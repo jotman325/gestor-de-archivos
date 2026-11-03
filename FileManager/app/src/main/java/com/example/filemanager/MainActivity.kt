@@ -828,7 +828,7 @@ fun DrawerContent(viewModel: FileManagerViewModel, context: Context, onCloseDraw
                 }
 
                 // TOUCH PAD DE ANÁLISIS POR CATEGORÍA
-                Text("Análisis por Categoría (Touch Pad):", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = Color(0xFF72777D))
+                Text("Análisis por Categoría", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = Color(0xFF72777D))
                 Spacer(modifier = Modifier.height(6.dp))
 
                 Row(
