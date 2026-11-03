@@ -40,6 +40,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -59,6 +60,9 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.security.MessageDigest
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
@@ -87,6 +91,10 @@ enum class FileCategory {
 
 enum class ViewMode {
     LIST, GRID
+}
+
+enum class SortOption {
+    NAME_ASC, NAME_DESC, DATE_DESC, DATE_ASC, SIZE_DESC, SIZE_ASC
 }
 
 class FileManagerViewModel : ViewModel() {
@@ -123,11 +131,11 @@ class FileManagerViewModel : ViewModel() {
     private val _viewMode = MutableStateFlow(ViewMode.LIST)
     val viewMode: StateFlow<ViewMode> = _viewMode
 
+    private val _sortOption = MutableStateFlow(SortOption.NAME_ASC)
+    val sortOption: StateFlow<SortOption> = _sortOption
+
     private val _installedApps = MutableStateFlow<List<AppItem>>(emptyList())
     val installedApps: StateFlow<List<AppItem>> = _installedApps
-
-    private val _isCleaningCache = MutableStateFlow(false)
-    val isCleaningCache: StateFlow<Boolean> = _isCleaningCache
 
     private val _isFtpRunning = MutableStateFlow(false)
     val isFtpRunning: StateFlow<Boolean> = _isFtpRunning
@@ -136,7 +144,6 @@ class FileManagerViewModel : ViewModel() {
     val ftpAddress: StateFlow<String> = _ftpAddress
 
     private var ftpServer: FtpServer? = null
-    
     private var allScannedFiles: List<File> = emptyList()
     private val trashDir = File(Environment.getExternalStorageDirectory(), ".TrashBin")
 
@@ -151,13 +158,25 @@ class FileManagerViewModel : ViewModel() {
         loadFiles()
     }
 
-    // --- FUNCIONES DEL SERVIDOR FTP ---
-    fun toggleFtpServer(context: Context) {
-        if (_isFtpRunning.value) {
-            stopFtpServer()
-        } else {
-            startFtpServer(context)
+    // --- FILTRADO Y ORDENACIÓN ---
+    fun setSortOption(option: SortOption) {
+        _sortOption.value = option
+        filterAndSortFiles()
+    }
+
+    // --- NAVEGACIÓN BREADCRUMBS ---
+    fun navigateToDirectory(targetFile: File) {
+        if (targetFile.exists() && targetFile.isDirectory && targetFile.canRead()) {
+            _currentDirectory.value = targetFile
+            _currentCategory.value = FileCategory.ALL
+            updateSearchQuery("")
+            loadFiles()
         }
+    }
+
+    // --- SERVIDOR FTP ---
+    fun toggleFtpServer(context: Context) {
+        if (_isFtpRunning.value) stopFtpServer() else startFtpServer(context)
     }
 
     private fun getLocalIpAddress(context: Context): String {
@@ -166,10 +185,7 @@ class FileManagerViewModel : ViewModel() {
         val ipInt = wifiInfo.ipAddress
         return String.format(
             "%d.%d.%d.%d",
-            ipInt and 0xff,
-            ipInt shr 8 and 0xff,
-            ipInt shr 16 and 0xff,
-            ipInt shr 24 and 0xff
+            ipInt and 0xff, ipInt shr 8 and 0xff, ipInt shr 16 and 0xff, ipInt shr 24 and 0xff
         )
     }
 
@@ -181,15 +197,13 @@ class FileManagerViewModel : ViewModel() {
 
                 val ipAddress = getLocalIpAddress(context)
                 if (ipAddress == "0.0.0.0" || ipAddress.isEmpty()) {
-                    launch(Dispatchers.Main) {
-                        Toast.makeText(context, "Conéctate a una red WiFi primero", Toast.LENGTH_LONG).show()
-                    }
+                    launch(Dispatchers.Main) { Toast.makeText(context, "Conéctate a WiFi primero", Toast.LENGTH_LONG).show() }
                     return@launch
                 }
 
                 val serverFactory = FtpServerFactory()
                 val factory = ListenerFactory()
-                factory.port = 2121 
+                factory.port = 2121
                 serverFactory.addListener("default", factory.createListener())
 
                 val userManagerFactory = PropertiesUserManagerFactory()
@@ -199,9 +213,7 @@ class FileManagerViewModel : ViewModel() {
                 user.name = "admin"
                 user.password = "1234"
                 user.homeDirectory = Environment.getExternalStorageDirectory().absolutePath
-                
-                val authorities = listOf(WritePermission())
-                user.authorities = authorities
+                user.authorities = listOf(WritePermission())
 
                 userManager.save(user)
                 serverFactory.userManager = userManager
@@ -215,10 +227,9 @@ class FileManagerViewModel : ViewModel() {
                     Toast.makeText(context, "Servidor FTP iniciado", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
-                e.printStackTrace()
                 launch(Dispatchers.Main) {
                     _isFtpRunning.value = false
-                    Toast.makeText(context, "Error al iniciar FTP: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, "Error FTP: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
                 }
             }
         }
@@ -232,13 +243,11 @@ class FileManagerViewModel : ViewModel() {
                     _isFtpRunning.value = false
                     _ftpAddress.value = ""
                 }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
+            } catch (e: Exception) { e.printStackTrace() }
         }
     }
 
-    // --- ANÁLISIS DE ARCHIVOS DUPLICADOS ---
+    // --- ANÁLISIS DUPLICADOS ---
     private fun getFileHash(file: File): String {
         return try {
             val digest = MessageDigest.getInstance("MD5")
@@ -250,9 +259,7 @@ class FileManagerViewModel : ViewModel() {
                 }
             }
             digest.digest().joinToString("") { "%02x".format(it) }
-        } catch (e: Exception) {
-            ""
-        }
+        } catch (e: Exception) { "" }
     }
 
     fun scanForDuplicates(context: Context) {
@@ -267,17 +274,14 @@ class FileManagerViewModel : ViewModel() {
                 val list = dir.listFiles() ?: return
                 for (file in list) {
                     if (file.name.startsWith(".") || file.name == ".TrashBin") continue
-                    if (file.isDirectory) {
-                        collectFiles(file)
-                    } else if (file.isFile && file.length() > 0) {
-                        val size = file.length()
-                        filesBySize.getOrPut(size) { mutableListOf() }.add(file)
+                    if (file.isDirectory) collectFiles(file)
+                    else if (file.isFile && file.length() > 0) {
+                        filesBySize.getOrPut(file.length()) { mutableListOf() }.add(file)
                     }
                 }
             }
 
             collectFiles(rootDir)
-
             val duplicatesList = mutableListOf<DuplicateGroup>()
             filesBySize.filter { it.value.size > 1 }.forEach { (size, candidateFiles) ->
                 val filesByHash = candidateFiles.groupBy { getFileHash(it) }
@@ -291,12 +295,12 @@ class FileManagerViewModel : ViewModel() {
             launch(Dispatchers.Main) {
                 _duplicateFiles.value = duplicatesList
                 _isScanningDuplicates.value = false
-                Toast.makeText(context, "Escaneo finalizado: ${duplicatesList.size} grupos encontrados", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "Análisis finalizado", Toast.LENGTH_SHORT).show()
             }
         }
     }
 
-    // --- GESTIÓN GENERAL DE ARCHIVOS Y CATEGORÍAS ---
+    // --- GESTIÓN DE ARCHIVOS Y CARPETAS ---
     fun toggleHiddenFiles() {
         _showHiddenFiles.value = !_showHiddenFiles.value
         if (_currentCategory.value == FileCategory.ALL || _currentCategory.value == FileCategory.TRASH) {
@@ -338,50 +342,6 @@ class FileManagerViewModel : ViewModel() {
         return String.format("%.1f MB", mb)
     }
 
-    fun cleanCache(context: Context) {
-        if (_isCleaningCache.value) return
-        _isCleaningCache.value = true
-        
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                var deletedBytes = 0L
-                val cacheDirs = mutableListOf<File>()
-                cacheDirs.add(context.cacheDir)
-                context.externalCacheDir?.let { cacheDirs.add(it) }
-                
-                val androidDataDir = File(Environment.getExternalStorageDirectory(), "Android/data")
-                if (androidDataDir.exists() && androidDataDir.canRead()) {
-                    androidDataDir.listFiles()?.forEach { appDir ->
-                        val appCacheDir = File(appDir, "cache")
-                        if (appCacheDir.exists()) cacheDirs.add(appCacheDir)
-                    }
-                }
-
-                cacheDirs.forEach { dir ->
-                    if (dir.exists()) {
-                        dir.walkBottomUp().forEach { file ->
-                            if (file.isFile) {
-                                val size = file.length()
-                                if (file.delete()) deletedBytes += size
-                            }
-                        }
-                    }
-                }
-
-                launch(Dispatchers.Main) {
-                    _isCleaningCache.value = false
-                    calculateStorageStats(context)
-                    Toast.makeText(context, "Caché limpiada: ${formatSize(deletedBytes)} liberados", Toast.LENGTH_SHORT).show()
-                }
-            } catch (e: Exception) {
-                launch(Dispatchers.Main) {
-                    _isCleaningCache.value = false
-                    Toast.makeText(context, "Error al limpiar la caché", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
-    }
-
     private fun loadApps(context: Context) {
         viewModelScope.launch(Dispatchers.IO) {
             val pm = context.packageManager
@@ -390,9 +350,7 @@ class FileManagerViewModel : ViewModel() {
                 .map { AppItem(it.loadLabel(pm).toString(), it.packageName, it.publicSourceDir) }
                 .sortedBy { it.name.lowercase() }
             
-            launch(Dispatchers.Main) {
-                _installedApps.value = apps
-            }
+            launch(Dispatchers.Main) { _installedApps.value = apps }
         }
     }
 
@@ -403,9 +361,7 @@ class FileManagerViewModel : ViewModel() {
                 val destDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
                 val dest = File(destDir, "${app.name.replace(" ", "_")}.apk")
                 source.copyTo(dest, overwrite = true)
-                launch(Dispatchers.Main) {
-                    Toast.makeText(context, "APK guardado en Descargas", Toast.LENGTH_SHORT).show()
-                }
+                launch(Dispatchers.Main) { Toast.makeText(context, "APK extraído", Toast.LENGTH_SHORT).show() }
             } catch (e: Exception) {
                 launch(Dispatchers.Main) { Toast.makeText(context, "Error al extraer", Toast.LENGTH_SHORT).show() }
             }
@@ -414,7 +370,7 @@ class FileManagerViewModel : ViewModel() {
 
     fun updateSearchQuery(query: String) {
         _searchQuery.value = query
-        filterFiles()
+        filterAndSortFiles()
     }
 
     fun setCategory(category: FileCategory, context: Context? = null) {
@@ -446,7 +402,6 @@ class FileManagerViewModel : ViewModel() {
                 val files = dir.listFiles() ?: return
                 for (file in files) {
                     if (!_showHiddenFiles.value && file.name.startsWith(".")) continue
-                    
                     if (file.isDirectory && file.name != "Android" && file.name != ".TrashBin") {
                         searchDirectory(file)
                     } else if (file.isFile) {
@@ -463,11 +418,10 @@ class FileManagerViewModel : ViewModel() {
             }
             
             searchDirectory(rootDir)
-            resultFiles.sortByDescending { it.lastModified() }
             
             launch(Dispatchers.Main) {
                 allScannedFiles = resultFiles
-                filterFiles()
+                filterAndSortFiles()
                 clearSelection()
             }
         }
@@ -478,18 +432,25 @@ class FileManagerViewModel : ViewModel() {
         if (!_showHiddenFiles.value) {
             allScannedFiles = allScannedFiles.filter { !it.name.startsWith(".") }
         }
-        allScannedFiles = allScannedFiles.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
-        filterFiles()
+        filterAndSortFiles()
         clearSelection()
     }
 
-    private fun filterFiles() {
+    private fun filterAndSortFiles() {
         if (_currentCategory.value == FileCategory.APPS || _currentCategory.value == FileCategory.FTP_SERVER || _currentCategory.value == FileCategory.DUPLICATES) return
-        _files.value = if (_searchQuery.value.isBlank()) {
-            allScannedFiles
-        } else {
-            allScannedFiles.filter { it.name.contains(_searchQuery.value, ignoreCase = true) }
+
+        var list = if (_searchQuery.value.isBlank()) allScannedFiles else allScannedFiles.filter { it.name.contains(_searchQuery.value, ignoreCase = true) }
+
+        val comparator = when (_sortOption.value) {
+            SortOption.NAME_ASC -> compareBy<File> { !it.isDirectory }.thenBy { it.name.lowercase() }
+            SortOption.NAME_DESC -> compareBy<File> { !it.isDirectory }.thenByDescending { it.name.lowercase() }
+            SortOption.DATE_DESC -> compareBy<File> { !it.isDirectory }.thenByDescending { it.lastModified() }
+            SortOption.DATE_ASC -> compareBy<File> { !it.isDirectory }.thenBy { it.lastModified() }
+            SortOption.SIZE_DESC -> compareBy<File> { !it.isDirectory }.thenByDescending { it.length() }
+            SortOption.SIZE_ASC -> compareBy<File> { !it.isDirectory }.thenBy { it.length() }
         }
+
+        _files.value = list.sortedWith(comparator)
     }
 
     fun openDirectory(file: File) {
@@ -518,12 +479,6 @@ class FileManagerViewModel : ViewModel() {
             return true
         }
         return false
-    }
-    
-    fun goToRoot() {
-        _currentCategory.value = FileCategory.ALL
-        _currentDirectory.value = File("/")
-        loadFiles()
     }
 
     fun toggleSelectionMode() {
@@ -574,8 +529,7 @@ class FileManagerViewModel : ViewModel() {
             if (source.exists()) {
                 val target = File(_currentDirectory.value, source.name)
                 try {
-                    val result = if (isCutOperation) source.renameTo(target)
-                    else source.copyRecursively(target, overwrite = true)
+                    val result = if (isCutOperation) source.renameTo(target) else source.copyRecursively(target, overwrite = true)
                     if (result) successCount++
                 } catch (e: Exception) { }
             }
@@ -605,12 +559,10 @@ class FileManagerViewModel : ViewModel() {
         clearSelection()
         if (_currentCategory.value == FileCategory.ALL || _currentCategory.value == FileCategory.TRASH) loadFiles() else setCategory(_currentCategory.value)
     }
-    
+
     fun restoreSelectedFiles() {
         val destDir = Environment.getExternalStorageDirectory()
-        _selectedFiles.value.forEach { file ->
-            file.renameTo(File(destDir, file.name))
-        }
+        _selectedFiles.value.forEach { file -> file.renameTo(File(destDir, file.name)) }
         clearSelection()
         loadFiles()
     }
@@ -630,14 +582,12 @@ class FileManagerViewModel : ViewModel() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 ZipOutputStream(FileOutputStream(zipFile)).use { zos ->
-                    _selectedFiles.value.forEach { file ->
-                        zipFileOrDirectory(file, file.name, zos)
-                    }
+                    _selectedFiles.value.forEach { file -> zipFileOrDirectory(file, file.name, zos) }
                 }
                 launch(Dispatchers.Main) {
                     clearSelection()
                     if (_currentCategory.value == FileCategory.ALL) loadFiles() else setCategory(_currentCategory.value)
-                    Toast.makeText(context, "Archivo comprimido: ${zipFile.name}", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "ZIP creado", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
                 launch(Dispatchers.Main) { Toast.makeText(context, "Error al comprimir", Toast.LENGTH_SHORT).show() }
@@ -648,26 +598,16 @@ class FileManagerViewModel : ViewModel() {
     private fun zipFileOrDirectory(fileToZip: File, fileName: String, zos: ZipOutputStream) {
         if (fileToZip.isHidden) return
         if (fileToZip.isDirectory) {
-            if (fileName.endsWith("/")) {
-                zos.putNextEntry(ZipEntry(fileName))
-                zos.closeEntry()
-            } else {
-                zos.putNextEntry(ZipEntry("$fileName/"))
-                zos.closeEntry()
-            }
-            val children = fileToZip.listFiles()
-            children?.forEach { childFile ->
-                zipFileOrDirectory(childFile, "$fileName/${childFile.name}", zos)
-            }
+            val entryName = if (fileName.endsWith("/")) fileName else "$fileName/"
+            zos.putNextEntry(ZipEntry(entryName))
+            zos.closeEntry()
+            fileToZip.listFiles()?.forEach { zipFileOrDirectory(it, "$fileName/${it.name}", zos) }
         } else {
             FileInputStream(fileToZip).use { fis ->
-                val zipEntry = ZipEntry(fileName)
-                zos.putNextEntry(zipEntry)
+                zos.putNextEntry(ZipEntry(fileName))
                 val bytes = ByteArray(1024)
                 var length: Int
-                while (fis.read(bytes).also { length = it } >= 0) {
-                    zos.write(bytes, 0, length)
-                }
+                while (fis.read(bytes).also { length = it } >= 0) zos.write(bytes, 0, length)
             }
         }
     }
@@ -689,9 +629,7 @@ class FileManagerViewModel : ViewModel() {
                             FileOutputStream(newFile).use { fos ->
                                 val buffer = ByteArray(1024)
                                 var len: Int
-                                while (zis.read(buffer).also { len = it } > 0) {
-                                    fos.write(buffer, 0, len)
-                                }
+                                while (zis.read(buffer).also { len = it } > 0) fos.write(buffer, 0, len)
                             }
                         }
                         zipEntry = zis.nextEntry
@@ -700,7 +638,7 @@ class FileManagerViewModel : ViewModel() {
                 }
                 launch(Dispatchers.Main) {
                     if (_currentCategory.value == FileCategory.ALL || _currentCategory.value == FileCategory.TRASH) loadFiles() else setCategory(_currentCategory.value)
-                    Toast.makeText(context, "Extraído en: ${destDir.name}", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "Extraído", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
                 launch(Dispatchers.Main) { Toast.makeText(context, "Error al extraer", Toast.LENGTH_SHORT).show() }
@@ -724,44 +662,34 @@ class FileManagerViewModel : ViewModel() {
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     }
                     context.startActivity(installIntent)
-                    Toast.makeText(context, "Permite la instalación de aplicaciones desconocidas", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, "Autoriza la instalación", Toast.LENGTH_LONG).show()
                     return
                 }
             }
 
-            val uri = FileProvider.getUriForFile(
-                context,
-                "${context.packageName}.provider",
-                file
-            )
-
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
             var mimeType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
-            if (extension == "apk") {
-                mimeType = "application/vnd.android.package-archive"
-            }
+            if (extension == "apk") mimeType = "application/vnd.android.package-archive"
 
             val intent = Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(uri, mimeType ?: "*/*")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-
             context.startActivity(intent)
         } catch (e: Exception) {
-            Toast.makeText(context, "No hay aplicación para abrir este archivo: ${e.message}", Toast.LENGTH_LONG).show()
+            Toast.makeText(context, "No hay aplicación para abrir este archivo", Toast.LENGTH_LONG).show()
         }
     }
 }
 
-// --- INTERFAZ GRÁFICA (Compose) ---
+// --- VISTAS EN JETPACK COMPOSE ---
 
 @Composable
-fun StorageInfoCard(viewModel: FileManagerViewModel) {
+fun StorageInfoCard(viewModel: FileManagerViewModel, onOpenSortDialog: () -> Unit) {
     val stats by viewModel.storageStats.collectAsState()
-    val isCleaning by viewModel.isCleaningCache.collectAsState()
     val showHidden by viewModel.showHiddenFiles.collectAsState()
     val viewMode by viewModel.viewMode.collectAsState()
-    val context = LocalContext.current
     
     Card(
         modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
@@ -771,10 +699,12 @@ fun StorageInfoCard(viewModel: FileManagerViewModel) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Text("Memoria Interna", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
                 Row {
-                    IconButton(onClick = { viewModel.toggleViewMode() }) { Text(if (viewMode == ViewMode.LIST) "🔲" else "📄") }
-                    IconButton(onClick = { viewModel.toggleHiddenFiles() }) { Text(if (showHidden) "👁️" else "🙈") }
+                    IconButton(onClick = onOpenSortDialog) { Text("🔀", fontSize = 20.sp) }
+                    IconButton(onClick = { viewModel.toggleViewMode() }) { Text(if (viewMode == ViewMode.LIST) "🔲" else "📄", fontSize = 20.sp) }
+                    IconButton(onClick = { viewModel.toggleHiddenFiles() }) { Text(if (showHidden) "👁️" else "🙈", fontSize = 20.sp) }
                 }
             }
+            Spacer(modifier = Modifier.height(8.dp))
             LinearProgressIndicator(
                 progress = { stats.percentageUsed },
                 modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)),
@@ -782,21 +712,105 @@ fun StorageInfoCard(viewModel: FileManagerViewModel) {
                 trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.2f)
             )
             Spacer(modifier = Modifier.height(8.dp))
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Column {
-                    Text("${viewModel.formatSize(stats.freeBytes)} libres de ${viewModel.formatSize(stats.totalBytes)}", style = MaterialTheme.typography.bodySmall)
-                }
-                Button(
-                    onClick = { viewModel.cleanCache(context) },
-                    enabled = !isCleaning,
-                    modifier = Modifier.height(36.dp),
-                    contentPadding = PaddingValues(horizontal = 12.dp)
-                ) {
-                    Text(if (isCleaning) "Limpiando..." else "🧹 Caché", style = MaterialTheme.typography.labelMedium)
-                }
+            Text("${viewModel.formatSize(stats.freeBytes)} libres de ${viewModel.formatSize(stats.totalBytes)}", style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
+
+@Composable
+fun SortDialog(currentSort: SortOption, onSelectSort: (SortOption) -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Ordenar y Filtrar") },
+        text = {
+            Column {
+                SortOptionItem("Nombre (A-Z)", SortOption.NAME_ASC, currentSort, onSelectSort)
+                SortOptionItem("Nombre (Z-A)", SortOption.NAME_DESC, currentSort, onSelectSort)
+                SortOptionItem("Fecha (Más reciente)", SortOption.DATE_DESC, currentSort, onSelectSort)
+                SortOptionItem("Fecha (Más antiguo)", SortOption.DATE_ASC, currentSort, onSelectSort)
+                SortOptionItem("Tamaño (Mayor a Menor)", SortOption.SIZE_DESC, currentSort, onSelectSort)
+                SortOptionItem("Tamaño (Menor a Mayor)", SortOption.SIZE_ASC, currentSort, onSelectSort)
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Cerrar") } }
+    )
+}
+
+@Composable
+fun SortOptionItem(label: String, option: SortOption, currentSort: SortOption, onSelectSort: (SortOption) -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().clickable { onSelectSort(option) }.padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        RadioButton(selected = (option == currentSort), onClick = { onSelectSort(option) })
+        Text(text = label, modifier = Modifier.padding(start = 8.dp), style = MaterialTheme.typography.bodyMedium)
+    }
+}
+
+@Composable
+fun PathBreadcrumbs(currentDir: File?, onPathClick: (File) -> Unit) {
+    val pathSegments = remember(currentDir) {
+        val segments = mutableListOf<File>()
+        var curr = currentDir
+        while (curr != null) {
+            segments.add(0, curr)
+            curr = curr.parentFile
+        }
+        segments
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        pathSegments.forEachIndexed { index, file ->
+            val displayName = if (file.path == "/") "Raíz (/)" else if (file.name == "0" && file.parent?.endsWith("emulated") == true) "Almacenamiento" else file.name
+            
+            Text(
+                text = displayName,
+                fontWeight = if (index == pathSegments.lastIndex) FontWeight.Bold else FontWeight.Normal,
+                color = if (index == pathSegments.lastIndex) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(4.dp))
+                    .clickable { onPathClick(file) }
+                    .padding(horizontal = 6.dp, vertical = 4.dp),
+                style = MaterialTheme.typography.bodyMedium
+            )
+            if (index < pathSegments.lastIndex) {
+                Text(" > ", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
             }
         }
     }
+}
+
+@Composable
+fun FileDetailsDialog(file: File, onDismiss: () -> Unit) {
+    val dateFormat = SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault())
+    val lastModifiedStr = dateFormat.format(Date(file.lastModified()))
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Detalles del Archivo") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Nombre: ${file.name}", fontWeight = FontWeight.Bold)
+                Text("Ruta: ${file.absolutePath}", style = MaterialTheme.typography.bodySmall)
+                Text("Tipo: ${if (file.isDirectory) "Carpeta" else file.extension.ifEmpty { "Desconocido" }}")
+                if (file.isFile) {
+                    Text("Tamaño: ${file.length()} bytes (${String.format("%.2f MB", file.length() / (1024.0 * 1024.0))})")
+                } else {
+                    val count = file.listFiles()?.size ?: 0
+                    Text("Contenido: $count elementos")
+                }
+                Text("Última Modificación: $lastModifiedStr")
+                Text("Permisos: ${if (file.canRead()) "R" else ""}${if (file.canWrite()) "W" else ""}")
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Cerrar") } }
+    )
 }
 
 @Composable
@@ -863,7 +877,6 @@ fun FtpServerScreen(viewModel: FileManagerViewModel) {
                 }
                 
                 Spacer(modifier = Modifier.height(24.dp))
-                
                 Button(onClick = { viewModel.toggleFtpServer(context) }) {
                     Text(if (isRunning) "Detener Servidor" else "Iniciar Servidor FTP")
                 }
@@ -885,24 +898,16 @@ fun DuplicatesScreen(viewModel: FileManagerViewModel) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text("👯 Archivos Duplicados", style = MaterialTheme.typography.titleLarge)
-            Button(
-                onClick = { viewModel.scanForDuplicates(context) },
-                enabled = !isScanning
-            ) {
+            Button(onClick = { viewModel.scanForDuplicates(context) }, enabled = !isScanning) {
                 Text(if (isScanning) "Escaneando..." else "🔍 Re-escanear")
             }
         }
-
         Spacer(modifier = Modifier.height(12.dp))
 
         if (isScanning) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator()
-            }
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
         } else if (duplicates.isEmpty()) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("No se encontraron archivos duplicados.")
-            }
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("No se encontraron archivos duplicados.") }
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 items(duplicates) { group ->
@@ -927,13 +932,7 @@ fun DuplicatesScreen(viewModel: FileManagerViewModel) {
                                         Text(file.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
                                         Text(file.parent ?: "", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
                                     }
-                                    IconButton(onClick = {
-                                        if (file.delete()) {
-                                            viewModel.scanForDuplicates(context)
-                                        }
-                                    }) {
-                                        Text("🗑️")
-                                    }
+                                    IconButton(onClick = { if (file.delete()) viewModel.scanForDuplicates(context) }) { Text("🗑️") }
                                 }
                                 HorizontalDivider()
                             }
@@ -956,12 +955,15 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
     val selectedFiles by viewModel.selectedFiles.collectAsState()
     val currentCategory by viewModel.currentCategory.collectAsState()
     val viewMode by viewModel.viewMode.collectAsState()
+    val currentSort by viewModel.sortOption.collectAsState()
     val context = LocalContext.current 
     
     LaunchedEffect(Unit) { viewModel.calculateStorageStats(context) }
     
     var showDeleteConfirm by remember { mutableStateOf(false) }
+    var showSortDialog by remember { mutableStateOf(false) }
     var fileToRename by remember { mutableStateOf<File?>(null) }
+    var fileForDetails by remember { mutableStateOf<File?>(null) }
     var newFileName by remember { mutableStateOf("") }
     var showZipDialog by remember { mutableStateOf(false) }
     var zipFileName by remember { mutableStateOf("") }
@@ -970,6 +972,17 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
     
     BackHandler(enabled = !isRoot || isSelectionMode) { 
         if (isSelectionMode) viewModel.clearSelection() else viewModel.navigateUp()
+    }
+
+    if (showSortDialog) {
+        SortDialog(
+            currentSort = currentSort,
+            onSelectSort = {
+                viewModel.setSortOption(it)
+                showSortDialog = false
+            },
+            onDismiss = { showSortDialog = false }
+        )
     }
 
     if (showDeleteConfirm) {
@@ -1004,6 +1017,10 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
         )
     }
 
+    if (fileForDetails != null) {
+        FileDetailsDialog(file = fileForDetails!!, onDismiss = { fileForDetails = null })
+    }
+
     if (showZipDialog) {
         AlertDialog(
             onDismissRequest = { showZipDialog = false },
@@ -1024,7 +1041,7 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         if (!isSelectionMode) {
-            StorageInfoCard(viewModel)
+            StorageInfoCard(viewModel = viewModel, onOpenSortDialog = { showSortDialog = true })
             CategoryGrid(viewModel, context)
             
             if (currentCategory != FileCategory.APPS && currentCategory != FileCategory.FTP_SERVER && currentCategory != FileCategory.DUPLICATES) {
@@ -1036,26 +1053,19 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
                     singleLine = true
                 )
             }
+
+            if (currentCategory == FileCategory.ALL || currentCategory == FileCategory.TRASH) {
+                PathBreadcrumbs(currentDir = currentDir, onPathClick = { viewModel.navigateToDirectory(it) })
+            }
             
             if (currentCategory != FileCategory.FTP_SERVER && currentCategory != FileCategory.DUPLICATES) {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Row {
-                        Button(onClick = { viewModel.navigateUp() }, enabled = !isRoot && currentCategory != FileCategory.APPS) { 
-                            Text(if (currentCategory != FileCategory.ALL && currentCategory != FileCategory.TRASH) "⬅ Volver" else "⬆ Subir") 
-                        }
-                        if (currentCategory == FileCategory.ALL) {
-                            TextButton(onClick = { viewModel.goToRoot() }) { Text("Raíz (/)") }
-                        }
-                    }
-                    
-                    if (hasClipboardData && (currentCategory == FileCategory.ALL || currentCategory == FileCategory.TRASH)) {
-                        Row {
-                            Button(onClick = { 
-                                viewModel.pasteFiles()
-                                viewModel.calculateStorageStats(context)
-                            }, modifier = Modifier.padding(end = 8.dp)) { Text("📋 Pegar") }
-                            OutlinedButton(onClick = { viewModel.clearClipboard() }) { Text("❌") }
-                        }
+                if (hasClipboardData && (currentCategory == FileCategory.ALL || currentCategory == FileCategory.TRASH)) {
+                    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.End) {
+                        Button(onClick = { 
+                            viewModel.pasteFiles()
+                            viewModel.calculateStorageStats(context)
+                        }, modifier = Modifier.padding(end = 8.dp)) { Text("📋 Pegar") }
+                        OutlinedButton(onClick = { viewModel.clearClipboard() }) { Text("❌") }
                     }
                 }
             }
@@ -1086,28 +1096,14 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
             }
         }
         
-        if (currentCategory != FileCategory.FTP_SERVER && currentCategory != FileCategory.DUPLICATES) {
-            Text(
-                text = if (currentCategory == FileCategory.APPS) "Gestor de Aplicaciones" 
-                       else if (currentCategory == FileCategory.ALL || currentCategory == FileCategory.TRASH) "Ruta: ${currentDir?.absolutePath ?: "/"}" 
-                       else "Categoría: ${currentCategory.name}", 
-                style = MaterialTheme.typography.labelMedium, 
-                modifier = Modifier.padding(vertical = 8.dp)
-            )
-        }
-        
         when (currentCategory) {
-            FileCategory.FTP_SERVER -> {
-                FtpServerScreen(viewModel)
-            }
-            FileCategory.DUPLICATES -> {
-                DuplicatesScreen(viewModel)
-            }
+            FileCategory.FTP_SERVER -> FtpServerScreen(viewModel)
+            FileCategory.DUPLICATES -> DuplicatesScreen(viewModel)
             FileCategory.APPS -> {
                 LazyColumn {
                     items(apps) { app ->
                         Row(modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text("📱", modifier = Modifier.padding(end = 12.dp), style = MaterialTheme.typography.titleLarge)
+                            Text("📱", modifier = Modifier.padding(end = 12.dp), fontSize = 44.sp)
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(text = app.name, style = MaterialTheme.typography.bodyMedium)
                                 Text(text = app.packageName, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1122,13 +1118,28 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
                 if (viewMode == ViewMode.LIST) {
                     LazyColumn {
                         items(files) { file ->
-                            FileListItem(file, isSelectionMode, selectedFiles.contains(file), viewModel, context, { fileToRename = it; newFileName = it.name })
+                            FileListItem(
+                                file = file,
+                                isSelectionMode = isSelectionMode,
+                                isSelected = selectedFiles.contains(file),
+                                viewModel = viewModel,
+                                context = context,
+                                onRename = { fileToRename = it; newFileName = it.name },
+                                onShowDetails = { fileForDetails = it }
+                            )
                         }
                     }
                 } else {
                     LazyVerticalGrid(columns = GridCells.Fixed(3), modifier = Modifier.fillMaxSize()) {
                         items(files) { file ->
-                            FileGridItem(file, isSelectionMode, selectedFiles.contains(file), viewModel, context)
+                            FileGridItem(
+                                file = file,
+                                isSelectionMode = isSelectionMode,
+                                isSelected = selectedFiles.contains(file),
+                                viewModel = viewModel,
+                                context = context,
+                                onShowDetails = { fileForDetails = it }
+                            )
                         }
                     }
                 }
@@ -1138,7 +1149,15 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
 }
 
 @Composable
-fun FileListItem(file: File, isSelectionMode: Boolean, isSelected: Boolean, viewModel: FileManagerViewModel, context: Context, onRename: (File) -> Unit) {
+fun FileListItem(
+    file: File,
+    isSelectionMode: Boolean,
+    isSelected: Boolean,
+    viewModel: FileManagerViewModel,
+    context: Context,
+    onRename: (File) -> Unit,
+    onShowDetails: (File) -> Unit
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1155,45 +1174,69 @@ fun FileListItem(file: File, isSelectionMode: Boolean, isSelected: Boolean, view
         Checkbox(checked = isSelected, onCheckedChange = { viewModel.toggleFileSelection(file) }, modifier = Modifier.padding(end = 8.dp))
         val isImage = file.extension.lowercase() in listOf("jpg", "jpeg", "png", "webp", "gif", "bmp")
         if (isImage) {
-            AsyncImage(model = file, contentDescription = "Miniatura", modifier = Modifier.size(40.dp).padding(end = 12.dp), contentScale = ContentScale.Crop)
+            AsyncImage(model = file, contentDescription = "Miniatura", modifier = Modifier.size(64.dp).padding(end = 12.dp), contentScale = ContentScale.Crop)
         } else {
-            Text(text = if (file.isDirectory) "📁" else if (file.extension.lowercase() == "zip") "📦" else "📄", modifier = Modifier.padding(end = 12.dp), style = MaterialTheme.typography.titleLarge)
+            Text(
+                text = if (file.isDirectory) "📁" else if (file.extension.lowercase() == "zip") "📦" else "📄",
+                modifier = Modifier.padding(end = 12.dp),
+                fontSize = 44.sp
+            )
         }
         Column(modifier = Modifier.weight(1f)) {
-            Text(text = file.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(text = file.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
+            Text(text = if (file.isDirectory) "Carpeta" else viewModel.formatSize(file.length()), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        if (!isSelectionMode && viewModel.currentCategory.value != FileCategory.TRASH) {
-            IconButton(onClick = { onRename(file) }) { Text("✏️") }
+        if (!isSelectionMode) {
+            IconButton(onClick = { onShowDetails(file) }) { Text("ℹ️", fontSize = 20.sp) }
+            if (viewModel.currentCategory.value != FileCategory.TRASH) {
+                IconButton(onClick = { onRename(file) }) { Text("✏️", fontSize = 20.sp) }
+            }
         }
     }
     HorizontalDivider()
 }
 
 @Composable
-fun FileGridItem(file: File, isSelectionMode: Boolean, isSelected: Boolean, viewModel: FileManagerViewModel, context: Context) {
+fun FileGridItem(
+    file: File,
+    isSelectionMode: Boolean,
+    isSelected: Boolean,
+    viewModel: FileManagerViewModel,
+    context: Context,
+    onShowDetails: (File) -> Unit
+) {
     Column(
         modifier = Modifier
-            .padding(4.dp)
-            .background(if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f) else MaterialTheme.colorScheme.surface, RoundedCornerShape(8.dp))
+            .padding(6.dp)
+            .background(if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f) else MaterialTheme.colorScheme.surface, RoundedCornerShape(12.dp))
             .clickable {
                 if (isSelectionMode) viewModel.toggleFileSelection(file)
                 else if (file.isDirectory) viewModel.openDirectory(file)
                 else if (file.extension.lowercase() == "zip") viewModel.unzipFile(file, context)
                 else viewModel.openFile(context, file)
             }
-            .padding(8.dp),
+            .padding(10.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        if (isSelectionMode) {
-            Checkbox(checked = isSelected, onCheckedChange = { viewModel.toggleFileSelection(file) })
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            if (isSelectionMode) {
+                Checkbox(checked = isSelected, onCheckedChange = { viewModel.toggleFileSelection(file) })
+            } else {
+                Spacer(modifier = Modifier.weight(1f))
+                Text(
+                    text = "ℹ️",
+                    modifier = Modifier.clickable { onShowDetails(file) }.padding(2.dp),
+                    fontSize = 18.sp
+                )
+            }
         }
         val isImage = file.extension.lowercase() in listOf("jpg", "jpeg", "png", "webp", "gif", "bmp")
         if (isImage) {
-            AsyncImage(model = file, contentDescription = "Miniatura", modifier = Modifier.size(48.dp).padding(bottom = 4.dp), contentScale = ContentScale.Crop)
+            AsyncImage(model = file, contentDescription = "Miniatura", modifier = Modifier.size(80.dp).padding(bottom = 6.dp), contentScale = ContentScale.Crop)
         } else {
-            Text(text = if (file.isDirectory) "📁" else if (file.extension.lowercase() == "zip") "📦" else "📄", style = MaterialTheme.typography.headlineMedium, modifier = Modifier.padding(bottom = 4.dp))
+            Text(text = if (file.isDirectory) "📁" else if (file.extension.lowercase() == "zip") "📦" else "📄", fontSize = 56.sp, modifier = Modifier.padding(bottom = 6.dp))
         }
-        Text(text = file.name, style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Text(text = file.name, style = MaterialTheme.typography.labelMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
 }
 
