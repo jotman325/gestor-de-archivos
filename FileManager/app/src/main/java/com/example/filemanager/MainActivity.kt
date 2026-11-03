@@ -198,7 +198,11 @@ class FileManagerViewModel : ViewModel() {
     fun closeSearch() {
         _isSearchActive.value = false
         _searchQuery.value = ""
-        filterAndSortFiles()
+        if (_currentCategory.value == FileCategory.ALL) {
+            loadFiles()
+        } else {
+            scanAllFilesByCategory(_currentCategory.value)
+        }
     }
 
     fun setViewMode(mode: ViewMode) {
@@ -506,10 +510,45 @@ class FileManagerViewModel : ViewModel() {
 
     fun updateSearchQuery(query: String) {
         _searchQuery.value = query
-        filterAndSortFiles()
+        if (_isSearchActive.value && query.isNotBlank()) {
+            searchGlobally(query)
+        } else {
+            filterAndSortFiles()
+        }
+    }
+
+    private fun searchGlobally(query: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val rootDir = Environment.getExternalStorageDirectory()
+            val matchedFiles = mutableListOf<File>()
+
+            fun scanDir(dir: File) {
+                val list = dir.listFiles() ?: return
+                for (file in list) {
+                    if (!_showHiddenFiles.value && file.name.startsWith(".")) continue
+                    if (file.name.contains(query, ignoreCase = true)) {
+                        matchedFiles.add(file)
+                    }
+                    if (file.isDirectory && file.name != "Android" && file.name != ".TrashBin") {
+                        scanDir(file)
+                    }
+                }
+            }
+
+            scanDir(rootDir)
+
+            launch(Dispatchers.Main) {
+                _files.value = matchedFiles
+            }
+        }
     }
 
     fun setCategory(category: FileCategory, context: Context? = null, fromStorageAnalysis: Boolean = false) {
+        if (_isSearchActive.value) {
+            _isSearchActive.value = false
+            _searchQuery.value = ""
+        }
+
         if (fromStorageAnalysis) {
             _previousCategory.value = FileCategory.STORAGE_ANALYSIS
         } else if (category == FileCategory.STORAGE_ANALYSIS || category == FileCategory.ALL) {
