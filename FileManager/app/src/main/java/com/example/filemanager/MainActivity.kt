@@ -58,6 +58,7 @@ import org.apache.ftpserver.usermanager.impl.WritePermission
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.security.MessageDigest
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
@@ -75,8 +76,13 @@ data class AppItem(
     val sourceDir: String
 )
 
+data class DuplicateGroup(
+    val fileSize: Long,
+    val files: List<File>
+)
+
 enum class FileCategory {
-    ALL, IMAGES, VIDEOS, AUDIO, DOCUMENTS, DOWNLOADS, APPS, TRASH, FTP_SERVER
+    ALL, IMAGES, VIDEOS, AUDIO, DOCUMENTS, DOWNLOADS, APPS, TRASH, FTP_SERVER, DUPLICATES
 }
 
 enum class ViewMode {
@@ -134,11 +140,18 @@ class FileManagerViewModel : ViewModel() {
     private var allScannedFiles: List<File> = emptyList()
     private val trashDir = File(Environment.getExternalStorageDirectory(), ".TrashBin")
 
+    private val _duplicateFiles = MutableStateFlow<List<DuplicateGroup>>(emptyList())
+    val duplicateFiles: StateFlow<List<DuplicateGroup>> = _duplicateFiles
+
+    private val _isScanningDuplicates = MutableStateFlow(false)
+    val isScanningDuplicates: StateFlow<Boolean> = _isScanningDuplicates
+
     init {
         if (!trashDir.exists()) trashDir.mkdirs()
         loadFiles()
     }
 
+    // --- FUNCIONES DEL SERVIDOR FTP ---
     fun toggleFtpServer(context: Context) {
         if (_isFtpRunning.value) {
             stopFtpServer()
@@ -161,56 +174,55 @@ class FileManagerViewModel : ViewModel() {
     }
 
     private fun startFtpServer(context: Context) {
-    viewModelScope.launch(Dispatchers.IO) {
-        try {
-            // Detener servidor previo si continuaba abierto
-            ftpServer?.stop()
-            ftpServer = null
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                ftpServer?.stop()
+                ftpServer = null
 
-            val ipAddress = getLocalIpAddress(context)
-            if (ipAddress == "0.0.0.0" || ipAddress.isEmpty()) {
-                launch(Dispatchers.Main) {
-                    Toast.makeText(context, "Conéctate a una red WiFi primero", Toast.LENGTH_LONG).show()
+                val ipAddress = getLocalIpAddress(context)
+                if (ipAddress == "0.0.0.0" || ipAddress.isEmpty()) {
+                    launch(Dispatchers.Main) {
+                        Toast.makeText(context, "Conéctate a una red WiFi primero", Toast.LENGTH_LONG).show()
+                    }
+                    return@launch
                 }
-                return@launch
-            }
 
-            val serverFactory = FtpServerFactory()
-            val factory = ListenerFactory()
-            factory.port = 2121 
-            serverFactory.addListener("default", factory.createListener())
+                val serverFactory = FtpServerFactory()
+                val factory = ListenerFactory()
+                factory.port = 2121 
+                serverFactory.addListener("default", factory.createListener())
 
-            val userManagerFactory = PropertiesUserManagerFactory()
-            val userManager = userManagerFactory.createUserManager()
+                val userManagerFactory = PropertiesUserManagerFactory()
+                val userManager = userManagerFactory.createUserManager()
 
-            val user = BaseUser()
-            user.name = "admin"
-            user.password = "1234"
-            user.homeDirectory = Environment.getExternalStorageDirectory().absolutePath
-            
-            val authorities = listOf(WritePermission())
-            user.authorities = authorities
+                val user = BaseUser()
+                user.name = "admin"
+                user.password = "1234"
+                user.homeDirectory = Environment.getExternalStorageDirectory().absolutePath
+                
+                val authorities = listOf(WritePermission())
+                user.authorities = authorities
 
-            userManager.save(user)
-            serverFactory.userManager = userManager
+                userManager.save(user)
+                serverFactory.userManager = userManager
 
-            ftpServer = serverFactory.createServer()
-            ftpServer?.start()
+                ftpServer = serverFactory.createServer()
+                ftpServer?.start()
 
-            launch(Dispatchers.Main) {
-                _ftpAddress.value = "ftp://$ipAddress:2121"
-                _isFtpRunning.value = true
-                Toast.makeText(context, "Servidor FTP iniciado", Toast.LENGTH_SHORT).show()
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-            launch(Dispatchers.Main) {
-                _isFtpRunning.value = false
-                Toast.makeText(context, "Error al iniciar FTP: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                launch(Dispatchers.Main) {
+                    _ftpAddress.value = "ftp://$ipAddress:2121"
+                    _isFtpRunning.value = true
+                    Toast.makeText(context, "Servidor FTP iniciado", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                launch(Dispatchers.Main) {
+                    _isFtpRunning.value = false
+                    Toast.makeText(context, "Error al iniciar FTP: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                }
             }
         }
     }
-}
 
     private fun stopFtpServer() {
         viewModelScope.launch(Dispatchers.IO) {
@@ -226,11 +238,70 @@ class FileManagerViewModel : ViewModel() {
         }
     }
 
+    // --- ANÁLISIS DE ARCHIVOS DUPLICADOS ---
+    private fun getFileHash(file: File): String {
+        return try {
+            val digest = MessageDigest.getInstance("MD5")
+            file.inputStream().use { inputStream ->
+                val buffer = ByteArray(8192)
+                var bytesRead: Int
+                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                    digest.update(buffer, 0, bytesRead)
+                }
+            }
+            digest.digest().joinToString("") { "%02x".format(it) }
+        } catch (e: Exception) {
+            ""
+        }
+    }
+
+    fun scanForDuplicates(context: Context) {
+        if (_isScanningDuplicates.value) return
+        _isScanningDuplicates.value = true
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val rootDir = Environment.getExternalStorageDirectory()
+            val filesBySize = mutableMapOf<Long, MutableList<File>>()
+
+            fun collectFiles(dir: File) {
+                val list = dir.listFiles() ?: return
+                for (file in list) {
+                    if (file.name.startsWith(".") || file.name == ".TrashBin") continue
+                    if (file.isDirectory) {
+                        collectFiles(file)
+                    } else if (file.isFile && file.length() > 0) {
+                        val size = file.length()
+                        filesBySize.getOrPut(size) { mutableListOf() }.add(file)
+                    }
+                }
+            }
+
+            collectFiles(rootDir)
+
+            val duplicatesList = mutableListOf<DuplicateGroup>()
+            filesBySize.filter { it.value.size > 1 }.forEach { (size, candidateFiles) ->
+                val filesByHash = candidateFiles.groupBy { getFileHash(it) }
+                filesByHash.filter { it.key.isNotEmpty() && it.value.size > 1 }.forEach { (_, matchedFiles) ->
+                    duplicatesList.add(DuplicateGroup(size, matchedFiles))
+                }
+            }
+
+            duplicatesList.sortByDescending { it.fileSize * it.files.size }
+
+            launch(Dispatchers.Main) {
+                _duplicateFiles.value = duplicatesList
+                _isScanningDuplicates.value = false
+                Toast.makeText(context, "Escaneo finalizado: ${duplicatesList.size} grupos encontrados", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    // --- GESTIÓN GENERAL DE ARCHIVOS Y CATEGORÍAS ---
     fun toggleHiddenFiles() {
         _showHiddenFiles.value = !_showHiddenFiles.value
         if (_currentCategory.value == FileCategory.ALL || _currentCategory.value == FileCategory.TRASH) {
             loadFiles()
-        } else if (_currentCategory.value != FileCategory.APPS && _currentCategory.value != FileCategory.FTP_SERVER) {
+        } else if (_currentCategory.value != FileCategory.APPS && _currentCategory.value != FileCategory.FTP_SERVER && _currentCategory.value != FileCategory.DUPLICATES) {
             scanAllFilesByCategory(_currentCategory.value)
         }
     }
@@ -359,9 +430,8 @@ class FileManagerViewModel : ViewModel() {
                 _currentDirectory.value = trashDir
                 loadFiles()
             }
-            FileCategory.APPS -> {
-                if (context != null) loadApps(context)
-            }
+            FileCategory.APPS -> if (context != null) loadApps(context)
+            FileCategory.DUPLICATES -> if (context != null) scanForDuplicates(context)
             FileCategory.FTP_SERVER -> {}
             else -> scanAllFilesByCategory(category)
         }
@@ -414,7 +484,7 @@ class FileManagerViewModel : ViewModel() {
     }
 
     private fun filterFiles() {
-        if (_currentCategory.value == FileCategory.APPS || _currentCategory.value == FileCategory.FTP_SERVER) return
+        if (_currentCategory.value == FileCategory.APPS || _currentCategory.value == FileCategory.FTP_SERVER || _currentCategory.value == FileCategory.DUPLICATES) return
         _files.value = if (_searchQuery.value.isBlank()) {
             allScannedFiles
         } else {
@@ -647,7 +717,6 @@ class FileManagerViewModel : ViewModel() {
 
             val extension = file.extension.lowercase()
 
-            // Manejo de permisos para instalar APKs en Android 8.0+ (API 26)
             if (extension == "apk" && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 if (!context.packageManager.canRequestPackageInstalls()) {
                     val installIntent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
@@ -660,7 +729,6 @@ class FileManagerViewModel : ViewModel() {
                 }
             }
 
-            // Generar URI segura 'content://' mediante FileProvider
             val uri = FileProvider.getUriForFile(
                 context,
                 "${context.packageName}.provider",
@@ -740,6 +808,7 @@ fun CategoryGrid(viewModel: FileManagerViewModel, context: Context) {
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         CategoryButton("Carpetas", "📁", currentCategory == FileCategory.ALL) { viewModel.setCategory(FileCategory.ALL) }
+        CategoryButton("Duplicados", "👯", currentCategory == FileCategory.DUPLICATES) { viewModel.setCategory(FileCategory.DUPLICATES, context) }
         CategoryButton("PC (FTP)", "💻", currentCategory == FileCategory.FTP_SERVER) { viewModel.setCategory(FileCategory.FTP_SERVER) }
         CategoryButton("Imágenes", "🖼️", currentCategory == FileCategory.IMAGES) { viewModel.setCategory(FileCategory.IMAGES) }
         CategoryButton("Vídeos", "🎬", currentCategory == FileCategory.VIDEOS) { viewModel.setCategory(FileCategory.VIDEOS) }
@@ -797,6 +866,79 @@ fun FtpServerScreen(viewModel: FileManagerViewModel) {
                 
                 Button(onClick = { viewModel.toggleFtpServer(context) }) {
                     Text(if (isRunning) "Detener Servidor" else "Iniciar Servidor FTP")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun DuplicatesScreen(viewModel: FileManagerViewModel) {
+    val duplicates by viewModel.duplicateFiles.collectAsState()
+    val isScanning by viewModel.isScanningDuplicates.collectAsState()
+    val context = LocalContext.current
+
+    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("👯 Archivos Duplicados", style = MaterialTheme.typography.titleLarge)
+            Button(
+                onClick = { viewModel.scanForDuplicates(context) },
+                enabled = !isScanning
+            ) {
+                Text(if (isScanning) "Escaneando..." else "🔍 Re-escanear")
+            }
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        if (isScanning) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator()
+            }
+        } else if (duplicates.isEmpty()) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("No se encontraron archivos duplicados.")
+            }
+        } else {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                items(duplicates) { group ->
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Text(
+                                "Tamaño: ${viewModel.formatSize(group.fileSize)} por archivo (${group.files.size} copias)",
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            group.files.forEach { file ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(file.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+                                        Text(file.parent ?: "", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                                    }
+                                    IconButton(onClick = {
+                                        if (file.delete()) {
+                                            viewModel.scanForDuplicates(context)
+                                        }
+                                    }) {
+                                        Text("🗑️")
+                                    }
+                                }
+                                HorizontalDivider()
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -885,7 +1027,7 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
             StorageInfoCard(viewModel)
             CategoryGrid(viewModel, context)
             
-            if (currentCategory != FileCategory.APPS && currentCategory != FileCategory.FTP_SERVER) {
+            if (currentCategory != FileCategory.APPS && currentCategory != FileCategory.FTP_SERVER && currentCategory != FileCategory.DUPLICATES) {
                 OutlinedTextField(
                     value = searchQuery,
                     onValueChange = { viewModel.updateSearchQuery(it) },
@@ -895,7 +1037,7 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
                 )
             }
             
-            if (currentCategory != FileCategory.FTP_SERVER) {
+            if (currentCategory != FileCategory.FTP_SERVER && currentCategory != FileCategory.DUPLICATES) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Row {
                         Button(onClick = { viewModel.navigateUp() }, enabled = !isRoot && currentCategory != FileCategory.APPS) { 
@@ -944,7 +1086,7 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
             }
         }
         
-        if (currentCategory != FileCategory.FTP_SERVER) {
+        if (currentCategory != FileCategory.FTP_SERVER && currentCategory != FileCategory.DUPLICATES) {
             Text(
                 text = if (currentCategory == FileCategory.APPS) "Gestor de Aplicaciones" 
                        else if (currentCategory == FileCategory.ALL || currentCategory == FileCategory.TRASH) "Ruta: ${currentDir?.absolutePath ?: "/"}" 
@@ -957,6 +1099,9 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
         when (currentCategory) {
             FileCategory.FTP_SERVER -> {
                 FtpServerScreen(viewModel)
+            }
+            FileCategory.DUPLICATES -> {
+                DuplicatesScreen(viewModel)
             }
             FileCategory.APPS -> {
                 LazyColumn {
