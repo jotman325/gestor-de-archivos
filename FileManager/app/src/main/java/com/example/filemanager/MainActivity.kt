@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.drawable.BitmapDrawable
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.net.wifi.WifiManager
@@ -54,8 +55,11 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.media3.common.MediaItem
+import androidx.media3.exoplayer.ExoPlayer
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -186,9 +190,97 @@ class FileManagerViewModel : ViewModel() {
     private val _isScanningDuplicates = MutableStateFlow(false)
     val isScanningDuplicates: StateFlow<Boolean> = _isScanningDuplicates
 
+    // --- ESTADOS DEL REPRODUCTOR DE AUDIO INTERNO ---
+    private var exoPlayer: ExoPlayer? = null
+    
+    private val _currentlyPlayingAudio = MutableStateFlow<File?>(null)
+    val currentlyPlayingAudio: StateFlow<File?> = _currentlyPlayingAudio
+
+    private val _isPlaying = MutableStateFlow(false)
+    val isPlaying: StateFlow<Boolean> = _isPlaying
+
+    private val _audioPosition = MutableStateFlow(0L)
+    val audioPosition: StateFlow<Long> = _audioPosition
+
+    private val _audioDuration = MutableStateFlow(0L)
+    val audioDuration: StateFlow<Long> = _audioDuration
+
     init {
         if (!trashDir.exists()) trashDir.mkdirs()
         loadFiles()
+    }
+
+    fun initPlayer(context: Context) {
+        if (exoPlayer == null) {
+            exoPlayer = ExoPlayer.Builder(context).build().apply {
+                addListener(object : androidx.media3.common.Player.Listener {
+                    override fun onIsPlayingChanged(playing: Boolean) {
+                        _isPlaying.value = playing
+                    }
+                    override fun onPlaybackStateChanged(playbackState: Int) {
+                        if (playbackState == androidx.media3.common.Player.STATE_READY) {
+                            _audioDuration.value = duration.coerceAtLeast(0L)
+                        } else if (playbackState == androidx.media3.common.Player.STATE_ENDED) {
+                            _isPlaying.value = false
+                            _audioPosition.value = 0L
+                        }
+                    }
+                })
+            }
+
+            viewModelScope.launch {
+                while (true) {
+                    exoPlayer?.let { player ->
+                        if (player.isPlaying) {
+                            _audioPosition.value = player.currentPosition.coerceAtLeast(0L)
+                            _audioDuration.value = player.duration.coerceAtLeast(0L)
+                        }
+                    }
+                    delay(500)
+                }
+            }
+        }
+    }
+
+    fun playAudio(file: File, context: Context) {
+        initPlayer(context)
+        if (_currentlyPlayingAudio.value?.absolutePath == file.absolutePath) {
+            if (_isPlaying.value) pauseAudio() else resumeAudio()
+            return
+        }
+
+        _currentlyPlayingAudio.value = file
+        exoPlayer?.run {
+            setMediaItem(MediaItem.fromUri(Uri.fromFile(file)))
+            prepare()
+            play()
+        }
+    }
+
+    fun pauseAudio() {
+        exoPlayer?.pause()
+    }
+
+    fun resumeAudio() {
+        exoPlayer?.play()
+    }
+
+    fun seekAudioTo(positionMs: Long) {
+        exoPlayer?.seekTo(positionMs)
+        _audioPosition.value = positionMs
+    }
+
+    fun stopAndCloseAudio() {
+        exoPlayer?.stop()
+        _currentlyPlayingAudio.value = null
+        _isPlaying.value = false
+        _audioPosition.value = 0L
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        exoPlayer?.release()
+        exoPlayer = null
     }
 
     fun openSearch() {
@@ -878,6 +970,12 @@ class FileManagerViewModel : ViewModel() {
 
             val extension = file.extension.lowercase()
 
+            // Reproducción en reproductor interno si es un archivo de audio
+            if (extension in listOf("mp3", "wav", "ogg", "flac", "m4a")) {
+                playAudio(file, context)
+                return
+            }
+
             if (extension == "apk" && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 if (!context.packageManager.canRequestPackageInstalls()) {
                     val installIntent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
@@ -906,7 +1004,92 @@ class FileManagerViewModel : ViewModel() {
     }
 }
 
-// --- GENERADOR DE MINIATURAS DE PDF ---
+// --- COMPOSABLE DEL REPRODUCTOR INTERNO DE AUDIO ---
+
+@Composable
+fun AudioPlayerBar(viewModel: FileManagerViewModel) {
+    val currentAudio by viewModel.currentlyPlayingAudio.collectAsState()
+    val isPlaying by viewModel.isPlaying.collectAsState()
+    val position by viewModel.audioPosition.collectAsState()
+    val duration by viewModel.audioDuration.collectAsState()
+
+    if (currentAudio != null) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(8.dp),
+            shape = RoundedCornerShape(16.dp),
+            color = Color(0xFF1E293B),
+            shadowElevation = 8.dp
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("🎵", fontSize = 28.sp, modifier = Modifier.padding(end = 8.dp))
+                        Column {
+                            Text(
+                                text = currentAudio!!.name,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = "${formatTime(position)} / ${formatTime(duration)}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.LightGray
+                            )
+                        }
+                    }
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = {
+                            if (isPlaying) viewModel.pauseAudio() else viewModel.resumeAudio()
+                        }) {
+                            Text(if (isPlaying) "⏸️" else "▶️", fontSize = 24.sp)
+                        }
+                        IconButton(onClick = { viewModel.stopAndCloseAudio() }) {
+                            Text("✕", fontSize = 20.sp, color = Color.White)
+                        }
+                    }
+                }
+
+                if (duration > 0) {
+                    Slider(
+                        value = position.toFloat().coerceIn(0f, duration.toFloat()),
+                        onValueChange = { viewModel.seekAudioTo(it.toLong()) },
+                        valueRange = 0f..duration.toFloat(),
+                        colors = SliderDefaults.colors(
+                            thumbColor = Color(0xFF38BDF8),
+                            activeTrackColor = Color(0xFF38BDF8),
+                            inactiveTrackColor = Color.Gray
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(20.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+fun formatTime(ms: Long): String {
+    val totalSeconds = ms / 1000
+    val minutes = totalSeconds / 60
+    val seconds = totalSeconds % 60
+    return String.format("%02d:%02d", minutes, seconds)
+}
+
+// --- GENERADOR DE MINIATURAS (PDF y APK) ---
 
 @Composable
 fun PdfThumbnail(file: File, modifier: Modifier = Modifier) {
@@ -941,6 +1124,42 @@ fun PdfThumbnail(file: File, modifier: Modifier = Modifier) {
         )
     } else {
         Text("📄", fontSize = 44.sp, modifier = modifier)
+    }
+}
+
+@Composable
+fun ApkIconThumbnail(file: File, context: Context, modifier: Modifier = Modifier) {
+    var iconBitmap by remember(file) { mutableStateOf<Bitmap?>(null) }
+
+    LaunchedEffect(file) {
+        withContext(Dispatchers.IO) {
+            try {
+                val pm = context.packageManager
+                val packageInfo = pm.getPackageArchiveInfo(file.absolutePath, 0)
+                if (packageInfo != null) {
+                    val appInfo = packageInfo.applicationInfo
+                    appInfo.sourceDir = file.absolutePath
+                    appInfo.publicSourceDir = file.absolutePath
+                    val drawable = appInfo.loadIcon(pm)
+                    if (drawable is BitmapDrawable) {
+                        iconBitmap = drawable.bitmap
+                    }
+                }
+            } catch (e: Exception) {
+                iconBitmap = null
+            }
+        }
+    }
+
+    if (iconBitmap != null) {
+        Image(
+            bitmap = iconBitmap!!.asImageBitmap(),
+            contentDescription = "APK Icon",
+            modifier = modifier.clip(RoundedCornerShape(8.dp)),
+            contentScale = ContentScale.Fit
+        )
+    } else {
+        Text("🤖", fontSize = 44.sp, modifier = modifier)
     }
 }
 
@@ -1008,9 +1227,8 @@ fun DrawerContent(viewModel: FileManagerViewModel, context: Context, onCloseDraw
     }
 }
 
-// --- PANTALLA COMPLETA DE BÚSQUEDA (ESTILO CAPTURA 2) ---
+// --- PANTALLA COMPLETA DE BÚSQUEDA ---
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun FullScreenSearchView(
     viewModel: FileManagerViewModel,
@@ -1046,7 +1264,7 @@ fun FullScreenSearchView(
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = { viewModel.updateSearchQuery(it) },
-                placeholder = { Text("Buscar archivos", color = Color(0xFF72777D)) },
+                placeholder = { Text("Buscar archivos por nombre...", color = Color(0xFF72777D)) },
                 leadingIcon = { Text("🔍", fontSize = 18.sp) },
                 trailingIcon = {
                     if (searchQuery.isNotEmpty()) {
@@ -1071,98 +1289,34 @@ fun FullScreenSearchView(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        if (searchQuery.isBlank()) {
+        if (viewMode == ViewMode.LIST) {
             LazyColumn(modifier = Modifier.fillMaxSize()) {
-                item {
-                    Text(
-                        text = "Buscar por categoría",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = Color(0xFF72777D),
-                        modifier = Modifier.padding(vertical = 8.dp)
+                items(files) { file ->
+                    FileListItem(
+                        file = file,
+                        isSelectionMode = isSelectionMode,
+                        isSelected = selectedFiles.contains(file),
+                        viewModel = viewModel,
+                        context = context,
+                        onRename = onRename,
+                        onShowDetails = onShowDetails
                     )
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        SearchChip("Documentos") { viewModel.setCategory(FileCategory.DOCUMENTS, context) }
-                        SearchChip("Imágenes") { viewModel.setCategory(FileCategory.IMAGES, context) }
-                        SearchChip("Vídeos") { viewModel.setCategory(FileCategory.VIDEOS, context) }
-                        SearchChip("Música") { viewModel.setCategory(FileCategory.AUDIO, context) }
-                        SearchChip("Archivos") { viewModel.setCategory(FileCategory.OTHERS, context) }
-                        SearchChip("APKs") { viewModel.setCategory(FileCategory.APKs, context) }
-                        SearchChip("Carpetas") { viewModel.updateSearchQuery("folder") }
-                    }
-
-                    Spacer(modifier = Modifier.height(24.dp))
-
-                    Text(
-                        text = "Aplicaciones y carpetas",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = Color(0xFF72777D),
-                        modifier = Modifier.padding(vertical = 8.dp)
-                    )
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        SearchChip("Cámara") { viewModel.updateSearchQuery("DCIM") }
-                        SearchChip("Transferencias y descargas") { viewModel.setCategory(FileCategory.DOWNLOADS, context) }
-                        SearchChip("Capturas de pantalla y grabaciones") { viewModel.updateSearchQuery("Screenshots") }
-                        SearchChip("Telegram") { viewModel.updateSearchQuery("Telegram") }
-                        SearchChip("Grabadora") { viewModel.updateSearchQuery("Recorder") }
-                    }
                 }
             }
         } else {
-            if (viewMode == ViewMode.LIST) {
-                LazyColumn(modifier = Modifier.fillMaxSize()) {
-                    items(files) { file ->
-                        FileListItem(
-                            file = file,
-                            isSelectionMode = isSelectionMode,
-                            isSelected = selectedFiles.contains(file),
-                            viewModel = viewModel,
-                            context = context,
-                            onRename = onRename,
-                            onShowDetails = onShowDetails
-                        )
-                    }
-                }
-            } else {
-                LazyVerticalGrid(columns = GridCells.Fixed(3), modifier = Modifier.fillMaxSize()) {
-                    items(files) { file ->
-                        FileGridItem(
-                            file = file,
-                            isSelectionMode = isSelectionMode,
-                            isSelected = selectedFiles.contains(file),
-                            viewModel = viewModel,
-                            context = context,
-                            onShowDetails = onShowDetails
-                        )
-                    }
+            LazyVerticalGrid(columns = GridCells.Fixed(3), modifier = Modifier.fillMaxSize()) {
+                items(files) { file ->
+                    FileGridItem(
+                        file = file,
+                        isSelectionMode = isSelectionMode,
+                        isSelected = selectedFiles.contains(file),
+                        viewModel = viewModel,
+                        context = context,
+                        onShowDetails = onShowDetails
+                    )
                 }
             }
         }
-    }
-}
-
-@Composable
-fun SearchChip(label: String, onClick: () -> Unit) {
-    Surface(
-        onClick = onClick,
-        shape = RoundedCornerShape(16.dp),
-        color = Color(0xFFF2F4F7),
-        modifier = Modifier.padding(vertical = 2.dp)
-    ) {
-        Text(
-            text = label,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.Medium,
-            color = Color(0xFF1A1C1E)
-        )
     }
 }
 
@@ -1891,32 +2045,36 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
                 }
             },
             bottomBar = {
-                if (isSelectionMode) {
-                    val singleSelected = selectedFiles.firstOrNull()
-                    val isZip = selectedFiles.size == 1 && singleSelected?.extension?.lowercase() == "zip"
+                Column {
+                    AudioPlayerBar(viewModel = viewModel)
 
-                    ActionBottomSheet(
-                        selectedCount = selectedFiles.size,
-                        isTrash = currentCategory == FileCategory.TRASH,
-                        isZipFile = isZip,
-                        onCopy = { viewModel.copySelectedFiles() },
-                        onCut = { viewModel.cutSelectedFiles() },
-                        onDelete = { showDeleteConfirm = true },
-                        onZip = { showZipDialog = true },
-                        onExtractHere = { singleSelected?.let { viewModel.unzipFileHere(it, context) } },
-                        onExtractTo = { showFolderPickerForZip = singleSelected },
-                        onRename = {
-                            singleSelected?.let {
-                                fileToRename = it
-                                newFileName = it.name
-                            }
-                        },
-                        onShare = {
-                            singleSelected?.let { viewModel.shareFile(context, it) }
-                        },
-                        onRestore = { viewModel.restoreSelectedFiles() },
-                        onDismiss = { viewModel.clearSelection() }
-                    )
+                    if (isSelectionMode) {
+                        val singleSelected = selectedFiles.firstOrNull()
+                        val isZip = selectedFiles.size == 1 && singleSelected?.extension?.lowercase() == "zip"
+
+                        ActionBottomSheet(
+                            selectedCount = selectedFiles.size,
+                            isTrash = currentCategory == FileCategory.TRASH,
+                            isZipFile = isZip,
+                            onCopy = { viewModel.copySelectedFiles() },
+                            onCut = { viewModel.cutSelectedFiles() },
+                            onDelete = { showDeleteConfirm = true },
+                            onZip = { showZipDialog = true },
+                            onExtractHere = { singleSelected?.let { viewModel.unzipFileHere(it, context) } },
+                            onExtractTo = { showFolderPickerForZip = singleSelected },
+                            onRename = {
+                                singleSelected?.let {
+                                    fileToRename = it
+                                    newFileName = it.name
+                                }
+                            },
+                            onShare = {
+                                singleSelected?.let { viewModel.shareFile(context, it) }
+                            },
+                            onRestore = { viewModel.restoreSelectedFiles() },
+                            onDismiss = { viewModel.clearSelection() }
+                        )
+                    }
                 }
             },
             containerColor = Color.White
@@ -2050,9 +2208,11 @@ fun FileListItem(
 
         val ext = file.extension.lowercase()
         val isImage = ext in listOf("jpg", "jpeg", "png", "webp", "gif", "bmp")
+        val isVideo = ext in listOf("mp4", "mkv", "avi", "mov", "webm")
         val isPdf = ext == "pdf"
+        val isApk = ext == "apk"
 
-        if (isImage) {
+        if (isImage || isVideo) {
             AsyncImage(
                 model = file,
                 contentDescription = "Miniatura",
@@ -2061,13 +2221,13 @@ fun FileListItem(
             )
         } else if (isPdf) {
             PdfThumbnail(file = file, modifier = Modifier.size(64.dp).padding(end = 12.dp))
+        } else if (isApk) {
+            ApkIconThumbnail(file = file, context = context, modifier = Modifier.size(64.dp).padding(end = 12.dp))
         } else {
             val iconEmoji = when {
                 file.isDirectory -> "📁"
                 ext == "zip" -> "📦"
-                ext == "apk" -> "🤖"
-                ext in listOf("mp3", "wav", "ogg", "flac") -> "🎵"
-                ext in listOf("mp4", "mkv", "avi", "mov") -> "🎬"
+                ext in listOf("mp3", "wav", "ogg", "flac", "m4a") -> "🎵"
                 else -> "📄"
             }
             Text(
@@ -2130,9 +2290,11 @@ fun FileGridItem(
         }
         val ext = file.extension.lowercase()
         val isImage = ext in listOf("jpg", "jpeg", "png", "webp", "gif", "bmp")
+        val isVideo = ext in listOf("mp4", "mkv", "avi", "mov", "webm")
         val isPdf = ext == "pdf"
+        val isApk = ext == "apk"
 
-        if (isImage) {
+        if (isImage || isVideo) {
             AsyncImage(
                 model = file,
                 contentDescription = "Miniatura",
@@ -2141,13 +2303,13 @@ fun FileGridItem(
             )
         } else if (isPdf) {
             PdfThumbnail(file = file, modifier = Modifier.size(80.dp).padding(bottom = 6.dp))
+        } else if (isApk) {
+            ApkIconThumbnail(file = file, context = context, modifier = Modifier.size(80.dp).padding(bottom = 6.dp))
         } else {
             val iconEmoji = when {
                 file.isDirectory -> "📁"
                 ext == "zip" -> "📦"
-                ext == "apk" -> "🤖"
-                ext in listOf("mp3", "wav", "ogg", "flac") -> "🎵"
-                ext in listOf("mp4", "mkv", "avi", "mov") -> "🎬"
+                ext in listOf("mp3", "wav", "ogg", "flac", "m4a") -> "🎵"
                 else -> "📄"
             }
             Text(text = iconEmoji, fontSize = 56.sp, modifier = Modifier.padding(bottom = 6.dp))
