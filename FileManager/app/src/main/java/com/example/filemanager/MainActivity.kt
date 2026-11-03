@@ -650,9 +650,12 @@ class FileManagerViewModel : ViewModel() {
 
     fun openDirectory(file: File) {
         if (file.isDirectory) {
+            if (_isSearchActive.value) {
+                _isSearchActive.value = false
+                _searchQuery.value = ""
+            }
             _currentDirectory.value = file
             _currentCategory.value = FileCategory.ALL
-            updateSearchQuery("")
             loadFiles()
         }
     }
@@ -755,15 +758,25 @@ class FileManagerViewModel : ViewModel() {
     }
 
     fun deleteSelectedFiles(permanent: Boolean = false) {
+        if (!trashDir.exists()) trashDir.mkdirs()
+
         _selectedFiles.value.forEach { file ->
             if (permanent || _currentCategory.value == FileCategory.TRASH) {
                 if (file.isDirectory) file.deleteRecursively() else file.delete()
             } else {
-                file.renameTo(File(trashDir, file.name))
+                val destFile = File(trashDir, file.name)
+                file.renameTo(destFile)
             }
         }
         clearSelection()
-        if (_currentCategory.value == FileCategory.ALL || _currentCategory.value == FileCategory.TRASH) loadFiles() else setCategory(_currentCategory.value)
+
+        if (_isSearchActive.value && _searchQuery.value.isNotBlank()) {
+            searchGlobally(_searchQuery.value)
+        } else if (_currentCategory.value == FileCategory.ALL || _currentCategory.value == FileCategory.TRASH) {
+            loadFiles()
+        } else {
+            scanAllFilesByCategory(_currentCategory.value)
+        }
     }
 
     fun restoreSelectedFiles() {
@@ -1988,173 +2001,3 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
                         }
                     }
                 }
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-fun FileListItem(
-    file: File,
-    isSelectionMode: Boolean,
-    isSelected: Boolean,
-    viewModel: FileManagerViewModel,
-    context: Context,
-    onRename: (File) -> Unit,
-    onShowDetails: (File) -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(if (isSelected) Color(0xFFE2EDF8) else Color.Transparent)
-            .combinedClickable(
-                onClick = {
-                    if (isSelectionMode) viewModel.toggleFileSelection(file)
-                    else if (file.isDirectory) viewModel.openDirectory(file)
-                    else viewModel.openFile(context, file)
-                },
-                onLongClick = {
-                    viewModel.selectSingleFile(file)
-                }
-            )
-            .padding(vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        if (isSelectionMode) {
-            Checkbox(checked = isSelected, onCheckedChange = { viewModel.toggleFileSelection(file) }, modifier = Modifier.padding(end = 8.dp))
-        }
-
-        val ext = file.extension.lowercase()
-        val isImage = ext in listOf("jpg", "jpeg", "png", "webp", "gif", "bmp")
-        val isPdf = ext == "pdf"
-
-        if (isImage) {
-            AsyncImage(
-                model = file,
-                contentDescription = "Miniatura",
-                modifier = Modifier.size(64.dp).padding(end = 12.dp).clip(RoundedCornerShape(8.dp)),
-                contentScale = ContentScale.Crop
-            )
-        } else if (isPdf) {
-            PdfThumbnail(file = file, modifier = Modifier.size(64.dp).padding(end = 12.dp))
-        } else {
-            val iconEmoji = when {
-                file.isDirectory -> "📁"
-                ext == "zip" -> "📦"
-                ext == "apk" -> "🤖"
-                ext in listOf("mp3", "wav", "ogg", "flac") -> "🎵"
-                ext in listOf("mp4", "mkv", "avi", "mov") -> "🎬"
-                else -> "📄"
-            }
-            Text(
-                text = iconEmoji,
-                modifier = Modifier.padding(end = 12.dp),
-                fontSize = 44.sp
-            )
-        }
-
-        Column(modifier = Modifier.weight(1f)) {
-            Text(text = file.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium, color = Color(0xFF1A1C1E))
-            Text(text = if (file.isDirectory) "Carpeta" else viewModel.formatSize(file.length()), style = MaterialTheme.typography.labelSmall, color = Color(0xFF72777D))
-        }
-
-        if (!isSelectionMode) {
-            IconButton(onClick = { onShowDetails(file) }) { Text("ℹ️", fontSize = 20.sp) }
-        }
-    }
-    HorizontalDivider(color = Color(0xFFE1E2E5))
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-fun FileGridItem(
-    file: File,
-    isSelectionMode: Boolean,
-    isSelected: Boolean,
-    viewModel: FileManagerViewModel,
-    context: Context,
-    onShowDetails: (File) -> Unit
-) {
-    Column(
-        modifier = Modifier
-            .padding(6.dp)
-            .background(if (isSelected) Color(0xFFE2EDF8) else Color(0xFFF7F9FC), RoundedCornerShape(12.dp))
-            .combinedClickable(
-                onClick = {
-                    if (isSelectionMode) viewModel.toggleFileSelection(file)
-                    else if (file.isDirectory) viewModel.openDirectory(file)
-                    else viewModel.openFile(context, file)
-                },
-                onLongClick = {
-                    viewModel.selectSingleFile(file)
-                }
-            )
-            .padding(10.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            if (isSelectionMode) {
-                Checkbox(checked = isSelected, onCheckedChange = { viewModel.toggleFileSelection(file) })
-            } else {
-                Spacer(modifier = Modifier.weight(1f))
-                Text(
-                    text = "ℹ️",
-                    modifier = Modifier.clickable { onShowDetails(file) }.padding(2.dp),
-                    fontSize = 18.sp
-                )
-            }
-        }
-        val ext = file.extension.lowercase()
-        val isImage = ext in listOf("jpg", "jpeg", "png", "webp", "gif", "bmp")
-        val isPdf = ext == "pdf"
-
-        if (isImage) {
-            AsyncImage(
-                model = file,
-                contentDescription = "Miniatura",
-                modifier = Modifier.size(80.dp).padding(bottom = 6.dp).clip(RoundedCornerShape(8.dp)),
-                contentScale = ContentScale.Crop
-            )
-        } else if (isPdf) {
-            PdfThumbnail(file = file, modifier = Modifier.size(80.dp).padding(bottom = 6.dp))
-        } else {
-            val iconEmoji = when {
-                file.isDirectory -> "📁"
-                ext == "zip" -> "📦"
-                ext == "apk" -> "🤖"
-                ext in listOf("mp3", "wav", "ogg", "flac") -> "🎵"
-                ext in listOf("mp4", "mkv", "avi", "mov") -> "🎬"
-                else -> "📄"
-            }
-            Text(text = iconEmoji, fontSize = 56.sp, modifier = Modifier.padding(bottom = 6.dp))
-        }
-        Text(text = file.name, style = MaterialTheme.typography.labelMedium, maxLines = 2, overflow = TextOverflow.Ellipsis, color = Color(0xFF1A1C1E))
-    }
-}
-
-class MainActivity : ComponentActivity() {
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        
-        val builder = StrictMode.VmPolicy.Builder()
-        StrictMode.setVmPolicy(builder.build())
-        
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            if (!Environment.isExternalStorageManager()) {
-                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
-                intent.data = Uri.parse("package:$packageName")
-                startActivity(intent)
-            }
-        }
-
-        setContent {
-            MaterialTheme {
-                Surface {
-                    val viewModel: FileManagerViewModel = viewModel()
-                    FileListScreen(viewModel = viewModel)
-                }
-            }
-        }
-    }
-}
