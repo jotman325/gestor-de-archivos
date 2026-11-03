@@ -1,28 +1,3 @@
-Para aplicar las modificaciones requeridas en el submenú lateral, devolver la opción de FTP, habilitar el regreso automático al desglose de análisis y añadir la previsualización de archivos PDF, he actualizado el código de `MainActivity.kt`.
-
-### Resumen de cambios aplicados:
-
-1. **Submenú Lateral:**
-* Se eliminaron **Archivos grandes** y **Archivos duplicados**.
-* Se restauró la opción **PC (FTP)** (`FileCategory.FTP_SERVER`).
-
-
-2. **Navegación en Análisis de Almacenamiento:**
-* Al pulsar el botón de volver hacia atrás en el dispositivo (o el botón *Back*) mientras estás en una categoría que abriste desde el análisis de almacenamiento, regresarás directamente al **desglose completo de Análisis de almacenamiento** en lugar de ir a la vista general.
-
-
-3. **Previsualización de archivos PDF:**
-* Se incorporó el uso de `PdfRenderer` mediante la librería Coil para generar y mostrar la primera página de los archivos PDF en miniatura en las vistas de lista y cuadrícula.
-
-
-
----
-
-### Código completo y actualizado para `MainActivity.kt`
-
-Reemplaza todo el contenido de tu archivo `app/src/main/java/com/example/filemanager/MainActivity.kt` con el siguiente código:
-
-```kotlin
 package com.example.filemanager
 
 import android.app.usage.StorageStatsManager
@@ -1932,5 +1907,3 @@ class MainActivity : ComponentActivity() {
         }
     }
 }
-
-```
