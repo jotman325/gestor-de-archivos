@@ -7,6 +7,7 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Drawable
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.net.wifi.WifiManager
@@ -104,7 +105,8 @@ data class AppItem(
     val name: String,
     val packageName: String,
     val sourceDir: String,
-    val sizeBytes: Long = 0L
+    val sizeBytes: Long = 0L,
+    val icon: Drawable? = null
 )
 
 data class DuplicateGroup(
@@ -390,22 +392,21 @@ class FileManagerViewModel : ViewModel() {
         }
     }
 
-    // Carga únicamente aplicaciones de usuario (instaladas desde Play Store / fuentes externas)
     fun loadApps(context: Context) {
         viewModelScope.launch(Dispatchers.IO) {
             val pm = context.packageManager
             val apps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
-                .filter { appInfo -> (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) == 0 }
                 .map { appInfo ->
                     val file = File(appInfo.publicSourceDir)
                     AppItem(
                         name = appInfo.loadLabel(pm).toString(),
                         packageName = appInfo.packageName,
                         sourceDir = appInfo.publicSourceDir,
-                        sizeBytes = if (file.exists()) file.length() else 0L
+                        sizeBytes = if (file.exists()) file.length() else 0L,
+                        icon = try { appInfo.loadIcon(pm) } catch (e: Exception) { null }
                     )
                 }
-                .sortedByDescending { it.sizeBytes }
+                .sortedBy { it.name.lowercase() }
             
             launch(Dispatchers.Main) { _installedApps.value = apps }
         }
@@ -600,7 +601,9 @@ class FileManagerViewModel : ViewModel() {
         val gb = bytes / (1024.0 * 1024 * 1024)
         if (gb >= 1.0) return String.format("%.1f GB", gb)
         val mb = bytes / (1024.0 * 1024)
-        return String.format("%.1f MB", mb)
+        if (mb >= 1.0) return String.format("%.1f MB", mb)
+        val kb = bytes / 1024.0
+        return String.format("%.0f KB", kb)
     }
 
     fun updateSearchQuery(query: String) {
@@ -1438,7 +1441,20 @@ fun StorageAnalysisScreen(viewModel: FileManagerViewModel) {
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                                Text("📱", fontSize = 24.sp, modifier = Modifier.padding(end = 8.dp))
+                                if (app.icon != null) {
+                                    val bitmap = (app.icon as? BitmapDrawable)?.bitmap
+                                    if (bitmap != null) {
+                                        Image(
+                                            bitmap = bitmap.asImageBitmap(),
+                                            contentDescription = app.name,
+                                            modifier = Modifier.size(32.dp).padding(end = 8.dp)
+                                        )
+                                    } else {
+                                        Text("📱", fontSize = 24.sp, modifier = Modifier.padding(end = 8.dp))
+                                    }
+                                } else {
+                                    Text("📱", fontSize = 24.sp, modifier = Modifier.padding(end = 8.dp))
+                                }
                                 Text(app.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                             Text(viewModel.formatSize(app.sizeBytes), style = MaterialTheme.typography.bodyMedium, color = Color(0xFF00796B))
@@ -1547,7 +1563,7 @@ fun StorageAnalysisScreen(viewModel: FileManagerViewModel) {
     }
 }
 
-// --- PANTALLA DE SERVIDOR FTP COMPLETAMENTE CENTRADA ---
+// --- PANTALLA DE SERVIDOR FTP CENTRADA ---
 
 @Composable
 fun FtpServerScreen(viewModel: FileManagerViewModel) {
@@ -1854,6 +1870,8 @@ fun FileDetailsDialog(file: File, onDismiss: () -> Unit) {
     )
 }
 
+// --- PANTALLA DE ARCHIVOS DUPLICADOS (SIN ICONO Y CON NAVEGACIÓN/APERTURA) ---
+
 @Composable
 fun DuplicatesScreen(viewModel: FileManagerViewModel) {
     val duplicates by viewModel.duplicateFiles.collectAsState()
@@ -1866,9 +1884,9 @@ fun DuplicatesScreen(viewModel: FileManagerViewModel) {
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("👯 Archivos Duplicados", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text("Archivos Duplicados", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             Button(onClick = { viewModel.scanForDuplicates(context) }, enabled = !isScanning) {
-                Text(if (isScanning) "Escaneando..." else "🔍 Re-escanear")
+                Text(if (isScanning) "Escaneando..." else "Re-escanear")
             }
         }
         Spacer(modifier = Modifier.height(12.dp))
@@ -1882,7 +1900,7 @@ fun DuplicatesScreen(viewModel: FileManagerViewModel) {
                 items(duplicates) { group ->
                     Card(
                         modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFFF0F4F8)),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFFF7F9FC)),
                         shape = RoundedCornerShape(12.dp)
                     ) {
                         Column(modifier = Modifier.padding(12.dp)) {
@@ -1894,12 +1912,15 @@ fun DuplicatesScreen(viewModel: FileManagerViewModel) {
                             Spacer(modifier = Modifier.height(6.dp))
                             group.files.forEach { file ->
                                 Row(
-                                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { viewModel.openFile(context, file) }
+                                        .padding(vertical = 8.dp),
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Column(modifier = Modifier.weight(1f)) {
-                                        Text(file.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+                                        Text(file.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, maxLines = 1)
                                         Text(file.parent ?: "", style = MaterialTheme.typography.labelSmall, color = Color(0xFF72777D), maxLines = 1)
                                     }
                                     IconButton(onClick = { if (file.delete()) viewModel.scanForDuplicates(context) }) { Text("🗑️") }
@@ -1938,7 +1959,6 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
     LaunchedEffect(Unit) {
         viewModel.calculateStorageStats(context)
         
-        // Verificación inicial de permisos al abrir la aplicación
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             if (!Environment.isExternalStorageManager()) {
                 showPermissionDialog = true
@@ -1982,7 +2002,10 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
                     context.startActivity(intent)
                 }
             },
-            onDismiss = { showPermissionDialog = false }
+            onDismiss = {
+                showPermissionDialog = false
+                (context as? ComponentActivity)?.finish()
+            }
         )
     }
 
@@ -2096,7 +2119,7 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
                                     FileCategory.STORAGE_ANALYSIS -> "Análisis de almacenamiento"
                                     FileCategory.LARGE_FILES -> "Archivos grandes (>300MB)"
                                     FileCategory.DUPLICATES -> "Archivos duplicados"
-                                    FileCategory.APPS -> "Aplicaciones"
+                                    FileCategory.APPS -> "Apps"
                                     FileCategory.FTP_SERVER -> "PC (Servidor FTP)"
                                     else -> "Gestor de Archivos"
                                 },
@@ -2241,18 +2264,52 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
                                 LazyColumn {
                                     items(apps) { app ->
                                         Row(
-                                            modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clickable { viewModel.extractApp(app, context) }
+                                                .padding(vertical = 12.dp, horizontal = 4.dp),
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
-                                            Text("📱", modifier = Modifier.padding(end = 12.dp), fontSize = 44.sp)
-                                            Column(modifier = Modifier.weight(1f)) {
-                                                Text(text = app.name, style = MaterialTheme.typography.bodyMedium, color = Color(0xFF1A1C1E))
-                                                Text(text = app.packageName, style = MaterialTheme.typography.labelSmall, color = Color(0xFF72777D))
+                                            if (app.icon != null) {
+                                                val bitmap = (app.icon as? BitmapDrawable)?.bitmap
+                                                if (bitmap != null) {
+                                                    Image(
+                                                        bitmap = bitmap.asImageBitmap(),
+                                                        contentDescription = app.name,
+                                                        modifier = Modifier
+                                                            .size(42.dp)
+                                                            .padding(end = 12.dp)
+                                                    )
+                                                } else {
+                                                    Text("📱", modifier = Modifier.padding(end = 12.dp), fontSize = 32.sp)
+                                                }
+                                            } else {
+                                                Text("📱", modifier = Modifier.padding(end = 12.dp), fontSize = 32.sp)
                                             }
-                                            Text(viewModel.formatSize(app.sizeBytes), style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(end = 8.dp))
-                                            TextButton(onClick = { viewModel.extractApp(app, context) }) { Text("Extraer APK") }
+
+                                            Text(
+                                                text = app.name,
+                                                style = MaterialTheme.typography.bodyLarge,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFF1A1C1E),
+                                                modifier = Modifier.weight(1f)
+                                            )
+
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text(
+                                                    text = viewModel.formatSize(app.sizeBytes),
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    color = Color(0xFF72777D),
+                                                    modifier = Modifier.padding(end = 6.dp)
+                                                )
+                                                Text(
+                                                    text = ">",
+                                                    fontSize = 16.sp,
+                                                    color = Color(0xFFB0B5BA)
+                                                )
+                                            }
                                         }
-                                        HorizontalDivider(color = Color(0xFFE1E2E5))
+                                        HorizontalDivider(color = Color(0xFFF0F2F5))
                                     }
                                 }
                             }
