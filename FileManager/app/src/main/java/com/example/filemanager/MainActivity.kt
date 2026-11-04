@@ -3,6 +3,7 @@ package com.example.filemanager
 import android.app.usage.StorageStatsManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.drawable.BitmapDrawable
@@ -48,6 +49,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -190,7 +192,6 @@ class FileManagerViewModel : ViewModel() {
     private val _isScanningDuplicates = MutableStateFlow(false)
     val isScanningDuplicates: StateFlow<Boolean> = _isScanningDuplicates
 
-    // --- ESTADOS DEL REPRODUCTOR DE AUDIO INTERNO ---
     private var exoPlayer: ExoPlayer? = null
     
     private val _currentlyPlayingAudio = MutableStateFlow<File?>(null)
@@ -389,10 +390,12 @@ class FileManagerViewModel : ViewModel() {
         }
     }
 
+    // Carga únicamente aplicaciones de usuario (instaladas desde Play Store / fuentes externas)
     fun loadApps(context: Context) {
         viewModelScope.launch(Dispatchers.IO) {
             val pm = context.packageManager
             val apps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+                .filter { appInfo -> (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) == 0 }
                 .map { appInfo ->
                     val file = File(appInfo.publicSourceDir)
                     AppItem(
@@ -970,7 +973,6 @@ class FileManagerViewModel : ViewModel() {
 
             val extension = file.extension.lowercase()
 
-            // Reproducción en reproductor interno si es un archivo de audio
             if (extension in listOf("mp3", "wav", "ogg", "flac", "m4a")) {
                 playAudio(file, context)
                 return
@@ -1002,6 +1004,34 @@ class FileManagerViewModel : ViewModel() {
             Toast.makeText(context, "No hay aplicación para abrir este archivo", Toast.LENGTH_LONG).show()
         }
     }
+}
+
+// --- DIÁLOGO INICIAL DE SOLICITUD DE PERMISOS GENÉRICO ---
+
+@Composable
+fun PermissionDialog(
+    onRequestPermission: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text("Permisos requeridos", fontWeight = FontWeight.Bold)
+        },
+        text = {
+            Text("Para poder explorar, organizar y compartir tus archivos y aplicaciones correctamente, la aplicación necesita acceso total al almacenamiento del dispositivo.")
+        },
+        confirmButton = {
+            Button(onClick = onRequestPermission) {
+                Text("Conceder permiso")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancelar")
+            }
+        }
+    )
 }
 
 // --- COMPOSABLE DEL REPRODUCTOR INTERNO DE AUDIO ---
@@ -1517,42 +1547,106 @@ fun StorageAnalysisScreen(viewModel: FileManagerViewModel) {
     }
 }
 
+// --- PANTALLA DE SERVIDOR FTP COMPLETAMENTE CENTRADA ---
+
 @Composable
 fun FtpServerScreen(viewModel: FileManagerViewModel) {
     val isRunning by viewModel.isFtpRunning.collectAsState()
     val ftpAddress by viewModel.ftpAddress.collectAsState()
     val context = LocalContext.current
 
-    Column(
-        modifier = Modifier.fillMaxSize().padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        contentAlignment = Alignment.Center
     ) {
-        Text("💻 Acceso desde PC (Servidor FTP)", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-        Spacer(modifier = Modifier.height(16.dp))
-        
-        Card(
-            modifier = Modifier.fillMaxWidth().padding(16.dp),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFFF0F4F8)),
-            shape = RoundedCornerShape(16.dp)
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
         ) {
-            Column(modifier = Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                if (isRunning) {
-                    Text("Servidor Activo", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text("Introduce esta dirección en el Explorador de Archivos de tu PC:", textAlign = androidx.compose.ui.text.style.TextAlign.Center)
-                    Text(ftpAddress, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, modifier = Modifier.padding(vertical = 12.dp))
-                    Text("Usuario: admin", style = MaterialTheme.typography.bodyLarge)
-                    Text("Contraseña: 1234", style = MaterialTheme.typography.bodyLarge)
-                } else {
-                    Text("Servidor Detenido", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text("Inicia el servidor para acceder a los archivos del dispositivo desde la misma red WiFi.", textAlign = androidx.compose.ui.text.style.TextAlign.Center)
-                }
-                
-                Spacer(modifier = Modifier.height(24.dp))
-                Button(onClick = { viewModel.toggleFtpServer(context) }) {
-                    Text(if (isRunning) "Detener Servidor" else "Iniciar Servidor FTP")
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
+            ) {
+                Text("💻", fontSize = 28.sp, modifier = Modifier.padding(end = 8.dp))
+                Text(
+                    text = "Acceso desde PC (Servidor FTP)",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center
+                )
+            }
+            
+            Spacer(modifier = Modifier.height(24.dp))
+            
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFFF0F4F8)),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    if (isRunning) {
+                        Text(
+                            text = "Servidor Activo",
+                            color = Color(0xFF00796B),
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text(
+                            text = "Introduce esta dirección en el Explorador de Archivos de tu PC:",
+                            textAlign = TextAlign.Center,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = Color(0xFF42474E)
+                        )
+                        Text(
+                            text = ftpAddress,
+                            style = MaterialTheme.typography.headlineSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF1A1C1E),
+                            modifier = Modifier.padding(vertical = 12.dp)
+                        )
+                        Text(
+                            text = "Usuario: admin",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = Color(0xFF1A1C1E)
+                        )
+                        Text(
+                            text = "Contraseña: 1234",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = Color(0xFF1A1C1E)
+                        )
+                    } else {
+                        Text(
+                            text = "Servidor Detenido",
+                            color = MaterialTheme.colorScheme.error,
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text(
+                            text = "Inicia el servidor para acceder a los archivos del dispositivo desde la misma red WiFi.",
+                            textAlign = TextAlign.Center,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = Color(0xFF42474E)
+                        )
+                    }
+                    
+                    Spacer(modifier = Modifier.height(24.dp))
+                    Button(
+                        onClick = { viewModel.toggleFtpServer(context) },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isRunning) Color(0xFF5E35B1) else MaterialTheme.colorScheme.primary
+                        )
+                    ) {
+                        Text(if (isRunning) "Detener Servidor" else "Iniciar Servidor FTP")
+                    }
                 }
             }
         }
@@ -1839,7 +1933,18 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val coroutineScope = rememberCoroutineScope()
 
-    LaunchedEffect(Unit) { viewModel.calculateStorageStats(context) }
+    var showPermissionDialog by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        viewModel.calculateStorageStats(context)
+        
+        // Verificación inicial de permisos al abrir la aplicación
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (!Environment.isExternalStorageManager()) {
+                showPermissionDialog = true
+            }
+        }
+    }
 
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
@@ -1864,6 +1969,21 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
         } else {
             viewModel.navigateUp()
         }
+    }
+
+    if (showPermissionDialog) {
+        PermissionDialog(
+            onRequestPermission = {
+                showPermissionDialog = false
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                        data = Uri.parse("package:${context.packageName}")
+                    }
+                    context.startActivity(intent)
+                }
+            },
+            onDismiss = { showPermissionDialog = false }
+        )
     }
 
     if (showCreateFolderDialog) {
@@ -2324,14 +2444,6 @@ class MainActivity : ComponentActivity() {
         
         val builder = StrictMode.VmPolicy.Builder()
         StrictMode.setVmPolicy(builder.build())
-        
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            if (!Environment.isExternalStorageManager()) {
-                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
-                intent.data = Uri.parse("package:$packageName")
-                startActivity(intent)
-            }
-        }
 
         setContent {
             MaterialTheme {
