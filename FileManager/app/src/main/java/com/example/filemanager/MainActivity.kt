@@ -1,15 +1,14 @@
 package com.example.filemanager
 
-import android.app.WallpaperManager
 import android.app.usage.StorageStatsManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
-import android.graphics.BitmapFactory
+import android.graphics.Bitmap
 import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Drawable
 import android.graphics.pdf.PdfRenderer
-import android.media.RingtoneManager
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
@@ -50,18 +49,20 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
-import coil.ImageLoader
 import coil.compose.AsyncImage
 import coil.decode.VideoFrameDecoder
 import kotlinx.coroutines.Dispatchers
@@ -79,16 +80,13 @@ import org.apache.ftpserver.usermanager.impl.WritePermission
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
-
-// ==========================================
-// MODELOS DE DATOS Y ESTRUCTURAS
-// ==========================================
 
 data class StorageStats(
     val totalBytes: Long = 0,
@@ -112,26 +110,13 @@ data class AppItem(
     val packageName: String,
     val sourceDir: String,
     val sizeBytes: Long = 0L,
-    val isUserApp: Boolean = true
+    val icon: Drawable? = null
 )
 
 data class DuplicateGroup(
-    val fileName: String,
     val fileSize: Long,
     val files: List<File>
 )
-
-data class MediaFolderGroup(
-    val folderName: String,
-    val folderFile: File,
-    val sampleFile: File,
-    val itemCount: Int
-)
-
-enum class LargeFileSort {
-    DESCENDING,
-    ASCENDING
-}
 
 enum class FileCategory {
     ALL, IMAGES, VIDEOS, AUDIO, DOCUMENTS, DOWNLOADS, APKs, OTHERS, RECENT_MODIFIED, APPS, TRASH, FTP_SERVER, DUPLICATES, LARGE_FILES, STORAGE_ANALYSIS
@@ -144,10 +129,6 @@ enum class ViewMode {
 enum class SortOption {
     NAME_ASC, NAME_DESC, DATE_DESC, DATE_ASC, SIZE_DESC, SIZE_ASC
 }
-
-// ==========================================
-// VIEWMODEL PRINCIPAL
-// ==========================================
 
 class FileManagerViewModel : ViewModel() {
     private val _currentDirectory = MutableStateFlow(Environment.getExternalStorageDirectory())
@@ -200,24 +181,16 @@ class FileManagerViewModel : ViewModel() {
 
     private val _largeFiles = MutableStateFlow<List<File>>(emptyList())
     val largeFiles: StateFlow<List<File>> = _largeFiles
-
-    private val _largeFileThreshold = MutableStateFlow(100L * 1024 * 1024)
+    
+    // --- ESTADO PARA EL UMBRAL DE ARCHIVOS GRANDES ---
+    private val _largeFileThreshold = MutableStateFlow(300L * 1024 * 1024)
     val largeFileThreshold: StateFlow<Long> = _largeFileThreshold
-
-    private val _largeFileSort = MutableStateFlow(LargeFileSort.DESCENDING)
-    val largeFileSort: StateFlow<LargeFileSort> = _largeFileSort
 
     private val _isFtpRunning = MutableStateFlow(false)
     val isFtpRunning: StateFlow<Boolean> = _isFtpRunning
 
     private val _ftpAddress = MutableStateFlow("")
     val ftpAddress: StateFlow<String> = _ftpAddress
-
-    private val _mediaFolders = MutableStateFlow<List<MediaFolderGroup>>(emptyList())
-    val mediaFolders: StateFlow<List<MediaFolderGroup>> = _mediaFolders
-
-    private val _selectedMediaFolder = MutableStateFlow<File?>(null)
-    val selectedMediaFolder: StateFlow<File?> = _selectedMediaFolder
 
     private var ftpServer: FtpServer? = null
     private var allScannedFiles: List<File> = emptyList()
@@ -230,7 +203,7 @@ class FileManagerViewModel : ViewModel() {
     val isScanningDuplicates: StateFlow<Boolean> = _isScanningDuplicates
 
     private var exoPlayer: ExoPlayer? = null
-
+    
     private val _currentlyPlayingAudio = MutableStateFlow<File?>(null)
     val currentlyPlayingAudio: StateFlow<File?> = _currentlyPlayingAudio
 
@@ -254,13 +227,6 @@ class FileManagerViewModel : ViewModel() {
             scanAllFilesByCategory(FileCategory.LARGE_FILES)
         } else if (_currentCategory.value == FileCategory.STORAGE_ANALYSIS) {
             analyzeCategorySizes()
-        }
-    }
-
-    fun toggleLargeFileSort() {
-        _largeFileSort.value = if (_largeFileSort.value == LargeFileSort.DESCENDING) LargeFileSort.ASCENDING else LargeFileSort.DESCENDING
-        if (_currentCategory.value == FileCategory.LARGE_FILES) {
-            scanAllFilesByCategory(FileCategory.LARGE_FILES)
         }
     }
 
@@ -311,8 +277,14 @@ class FileManagerViewModel : ViewModel() {
         }
     }
 
-    fun pauseAudio() { exoPlayer?.pause() }
-    fun resumeAudio() { exoPlayer?.play() }
+    fun pauseAudio() {
+        exoPlayer?.pause()
+    }
+
+    fun resumeAudio() {
+        exoPlayer?.play()
+    }
+
     fun seekAudioTo(positionMs: Long) {
         exoPlayer?.seekTo(positionMs)
         _audioPosition.value = positionMs
@@ -331,14 +303,24 @@ class FileManagerViewModel : ViewModel() {
         exoPlayer = null
     }
 
-    fun openSearch() { _isSearchActive.value = true }
+    fun openSearch() {
+        _isSearchActive.value = true
+    }
+
     fun closeSearch() {
         _isSearchActive.value = false
         _searchQuery.value = ""
-        refreshCurrentCategoryView()
+        if (_currentCategory.value == FileCategory.ALL) {
+            loadFiles()
+        } else {
+            scanAllFilesByCategory(_currentCategory.value)
+        }
     }
 
-    fun setViewMode(mode: ViewMode) { _viewMode.value = mode }
+    fun setViewMode(mode: ViewMode) {
+        _viewMode.value = mode
+    }
+
     fun setSortOption(option: SortOption) {
         _sortOption.value = option
         filterAndSortFiles()
@@ -349,7 +331,7 @@ class FileManagerViewModel : ViewModel() {
         val newFolder = File(_currentDirectory.value, folderName)
         if (!newFolder.exists()) {
             if (newFolder.mkdirs()) {
-                refreshCurrentCategoryView()
+                loadFiles()
                 Toast.makeText(context, "Carpeta creada", Toast.LENGTH_SHORT).show()
             } else {
                 Toast.makeText(context, "Error al crear la carpeta", Toast.LENGTH_SHORT).show()
@@ -363,86 +345,8 @@ class FileManagerViewModel : ViewModel() {
         if (targetFile.exists() && targetFile.isDirectory && targetFile.canRead()) {
             _currentDirectory.value = targetFile
             _currentCategory.value = FileCategory.ALL
-            _selectedMediaFolder.value = null
             updateSearchQuery("")
             loadFiles()
-        }
-    }
-
-    fun openAndSelectDuplicates(duplicateGroup: DuplicateGroup) {
-        if (duplicateGroup.files.isEmpty()) return
-        val parentDir = duplicateGroup.files.first().parentFile
-        if (parentDir != null && parentDir.exists() && parentDir.canRead()) {
-            _currentDirectory.value = parentDir
-            _currentCategory.value = FileCategory.ALL
-            _selectedFiles.value = duplicateGroup.files.toSet()
-            _isSelectionMode.value = true
-            updateSearchQuery("")
-            loadFiles()
-        }
-    }
-
-    fun scanMediaByFolders(category: FileCategory) {
-        _selectedMediaFolder.value = null
-        viewModelScope.launch(Dispatchers.IO) {
-            val rootDir = Environment.getExternalStorageDirectory()
-            val folderMap = mutableMapOf<File, MutableList<File>>()
-
-            fun collectMedia(dir: File) {
-                val files = dir.listFiles() ?: return
-                for (file in files) {
-                    if (file.name.startsWith(".") || file.name == ".TrashBin") continue
-                    if (file.isDirectory) {
-                        collectMedia(file)
-                    } else if (file.isFile) {
-                        val ext = file.extension.lowercase()
-                        val match = when (category) {
-                            FileCategory.IMAGES -> ext in listOf("jpg", "jpeg", "gif", "bmp")
-                            FileCategory.VIDEOS -> ext in listOf("mp4", "mkv", "avi", "mov", "webm")
-                            else -> false
-                        }
-                        if (match) {
-                            val parent = file.parentFile ?: return
-                            folderMap.getOrPut(parent) { mutableListOf() }.add(file)
-                        }
-                    }
-                }
-            }
-
-            collectMedia(rootDir)
-
-            val groups = folderMap.map { (folder, list) ->
-                MediaFolderGroup(
-                    folderName = folder.name,
-                    folderFile = folder,
-                    sampleFile = list.first(),
-                    itemCount = list.size
-                )
-            }.sortedByDescending { it.itemCount }
-
-            launch(Dispatchers.Main) {
-                _mediaFolders.value = groups
-            }
-        }
-    }
-
-    fun selectMediaFolder(folder: File, category: FileCategory) {
-        _selectedMediaFolder.value = folder
-        viewModelScope.launch(Dispatchers.IO) {
-            val list = folder.listFiles()?.filter { file ->
-                if (file.name.startsWith(".")) return@filter false
-                val ext = file.extension.lowercase()
-                when (category) {
-                    FileCategory.IMAGES -> ext in listOf("jpg", "jpeg", "gif", "bmp")
-                    FileCategory.VIDEOS -> ext in listOf("mp4", "mkv", "avi", "mov", "webm")
-                    else -> false
-                }
-            } ?: emptyList()
-
-            launch(Dispatchers.Main) {
-                allScannedFiles = list
-                filterAndSortFiles()
-            }
         }
     }
 
@@ -456,6 +360,7 @@ class FileManagerViewModel : ViewModel() {
             var apkBytes = 0L
             var othBytes = 0L
             val largeList = mutableListOf<File>()
+
             val threshold = _largeFileThreshold.value
 
             fun scanSizes(dir: File) {
@@ -466,10 +371,13 @@ class FileManagerViewModel : ViewModel() {
                         scanSizes(file)
                     } else if (file.isFile) {
                         val len = file.length()
-                        if (len >= threshold) largeList.add(file)
+
+                        if (len >= threshold) {
+                            largeList.add(file)
+                        }
 
                         when (file.extension.lowercase()) {
-                            "jpg", "jpeg", "gif", "bmp" -> imgBytes += len
+                            "jpg", "jpeg", "png", "webp", "gif", "bmp" -> imgBytes += len
                             "mp4", "mkv", "avi", "mov", "webm" -> vidBytes += len
                             "mp3", "wav", "ogg", "flac", "m4a" -> audBytes += len
                             "pdf", "doc", "docx", "xls", "xlsx", "txt", "ppt", "pptx" -> docBytes += len
@@ -488,8 +396,13 @@ class FileManagerViewModel : ViewModel() {
 
             launch(Dispatchers.Main) {
                 _categorySizeStats.value = CategorySizeStats(
-                    imagesBytes = imgBytes, videosBytes = vidBytes, audioBytes = audBytes,
-                    docsBytes = docBytes, downloadsBytes = dwBytes, apksBytes = apkBytes, othersBytes = othBytes
+                    imagesBytes = imgBytes,
+                    videosBytes = vidBytes,
+                    audioBytes = audBytes,
+                    docsBytes = docBytes,
+                    downloadsBytes = dwBytes,
+                    apksBytes = apkBytes,
+                    othersBytes = othBytes
                 )
                 _largeFiles.value = largeList.sortedByDescending { it.length() }
             }
@@ -500,11 +413,7 @@ class FileManagerViewModel : ViewModel() {
         viewModelScope.launch(Dispatchers.IO) {
             val pm = context.packageManager
             val apps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
-                .filter { appInfo ->
-                    val isSystem = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
-                    val isUpdatedSystem = (appInfo.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
-                    !isSystem || isUpdatedSystem
-                }
+                .filter { appInfo -> (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) == 0 }
                 .map { appInfo ->
                     val file = File(appInfo.publicSourceDir)
                     AppItem(
@@ -512,11 +421,11 @@ class FileManagerViewModel : ViewModel() {
                         packageName = appInfo.packageName,
                         sourceDir = appInfo.publicSourceDir,
                         sizeBytes = if (file.exists()) file.length() else 0L,
-                        isUserApp = true
+                        icon = try { appInfo.loadIcon(pm) } catch (e: Exception) { null }
                     )
                 }
-                .sortedByDescending { it.sizeBytes }
-
+                .sortedBy { it.name.lowercase() }
+            
             launch(Dispatchers.Main) { _installedApps.value = apps }
         }
     }
@@ -621,13 +530,27 @@ class FileManagerViewModel : ViewModel() {
         }
     }
 
+    private fun getFileHash(file: File): String {
+        return try {
+            val digest = MessageDigest.getInstance("MD5")
+            file.inputStream().use { inputStream ->
+                val buffer = ByteArray(8192)
+                var bytesRead: Int
+                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                    digest.update(buffer, 0, bytesRead)
+                }
+            }
+            digest.digest().joinToString("") { "%02x".format(it) }
+        } catch (e: Exception) { "" }
+    }
+
     fun scanForDuplicates(context: Context) {
         if (_isScanningDuplicates.value) return
         _isScanningDuplicates.value = true
 
         viewModelScope.launch(Dispatchers.IO) {
             val rootDir = Environment.getExternalStorageDirectory()
-            val filesByName = mutableMapOf<String, MutableList<File>>()
+            val filesBySize = mutableMapOf<Long, MutableList<File>>()
 
             fun collectFiles(dir: File) {
                 val list = dir.listFiles() ?: return
@@ -635,21 +558,21 @@ class FileManagerViewModel : ViewModel() {
                     if (file.name.startsWith(".") || file.name == ".TrashBin") continue
                     if (file.isDirectory) collectFiles(file)
                     else if (file.isFile && file.length() > 0) {
-                        val key = file.name.lowercase(Locale.getDefault())
-                        filesByName.getOrPut(key) { mutableListOf() }.add(file)
+                        filesBySize.getOrPut(file.length()) { mutableListOf() }.add(file)
                     }
                 }
             }
 
             collectFiles(rootDir)
+            val duplicatesList = mutableListOf<DuplicateGroup>()
+            filesBySize.filter { it.value.size > 1 }.forEach { (size, candidateFiles) ->
+                val filesByHash = candidateFiles.groupBy { getFileHash(it) }
+                filesByHash.filter { it.key.isNotEmpty() && it.value.size > 1 }.forEach { (_, matchedFiles) ->
+                    duplicatesList.add(DuplicateGroup(size, matchedFiles))
+                }
+            }
 
-            val duplicatesList = filesByName.filter { it.value.size > 1 }.map { (name, list) ->
-                DuplicateGroup(
-                    fileName = list.first().name,
-                    fileSize = list.first().length(),
-                    files = list
-                )
-            }.sortedByDescending { it.files.size }
+            duplicatesList.sortByDescending { it.fileSize * it.files.size }
 
             launch(Dispatchers.Main) {
                 _duplicateFiles.value = duplicatesList
@@ -660,7 +583,11 @@ class FileManagerViewModel : ViewModel() {
 
     fun toggleHiddenFiles() {
         _showHiddenFiles.value = !_showHiddenFiles.value
-        refreshCurrentCategoryView()
+        if (_currentCategory.value == FileCategory.ALL || _currentCategory.value == FileCategory.TRASH) {
+            loadFiles()
+        } else if (_currentCategory.value != FileCategory.APPS && _currentCategory.value != FileCategory.DUPLICATES && _currentCategory.value != FileCategory.FTP_SERVER) {
+            scanAllFilesByCategory(_currentCategory.value)
+        }
     }
 
     fun toggleViewMode() {
@@ -692,7 +619,9 @@ class FileManagerViewModel : ViewModel() {
         val gb = bytes / (1024.0 * 1024 * 1024)
         if (gb >= 1.0) return String.format("%.1f GB", gb)
         val mb = bytes / (1024.0 * 1024)
-        return String.format("%.1f MB", mb)
+        if (mb >= 1.0) return String.format("%.1f MB", mb)
+        val kb = bytes / 1024.0
+        return String.format("%.0f KB", kb)
     }
 
     fun updateSearchQuery(query: String) {
@@ -743,12 +672,8 @@ class FileManagerViewModel : ViewModel() {
         }
 
         _currentCategory.value = category
-        _selectedMediaFolder.value = null
-
         when (category) {
             FileCategory.ALL -> loadFiles()
-            FileCategory.IMAGES, FileCategory.VIDEOS -> scanMediaByFolders(category)
-            FileCategory.AUDIO -> scanAllFilesByCategory(FileCategory.AUDIO)
             FileCategory.DOWNLOADS -> {
                 _currentDirectory.value = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
                 _currentCategory.value = FileCategory.ALL
@@ -759,11 +684,12 @@ class FileManagerViewModel : ViewModel() {
                 loadFiles()
             }
             FileCategory.APPS -> if (context != null) loadApps(context)
-            FileCategory.DUPLICATES -> if (context != null && _duplicateFiles.value.isEmpty()) scanForDuplicates(context)
+            FileCategory.DUPLICATES -> if (context != null) scanForDuplicates(context)
             FileCategory.STORAGE_ANALYSIS -> if (context != null) {
                 calculateStorageStats(context)
                 analyzeCategorySizes()
-                if (_duplicateFiles.value.isEmpty()) scanForDuplicates(context)
+                scanForDuplicates(context)
+                loadApps(context)
             }
             FileCategory.FTP_SERVER -> {}
             else -> scanAllFilesByCategory(category)
@@ -785,23 +711,24 @@ class FileManagerViewModel : ViewModel() {
                     } else if (file.isFile) {
                         val ext = file.extension.lowercase()
                         when (category) {
+                            FileCategory.IMAGES -> if (ext in listOf("jpg", "jpeg", "png", "webp", "gif", "bmp")) resultFiles.add(file)
+                            FileCategory.VIDEOS -> if (ext in listOf("mp4", "mkv", "avi", "mov", "webm")) resultFiles.add(file)
                             FileCategory.AUDIO -> if (ext in listOf("mp3", "wav", "ogg", "flac", "m4a")) resultFiles.add(file)
                             FileCategory.DOCUMENTS -> if (ext in listOf("pdf", "doc", "docx", "xls", "xlsx", "txt", "ppt", "pptx")) resultFiles.add(file)
                             FileCategory.APKs -> if (ext == "apk") resultFiles.add(file)
-                            FileCategory.OTHERS -> if (ext !in listOf("jpg", "jpeg", "gif", "bmp", "mp4", "mkv", "avi", "mov", "webm", "mp3", "wav", "ogg", "flac", "m4a", "pdf", "doc", "docx", "xls", "xlsx", "txt", "ppt", "pptx", "apk")) resultFiles.add(file)
+                            FileCategory.OTHERS -> if (ext !in listOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "mp4", "mkv", "avi", "mov", "webm", "mp3", "wav", "ogg", "flac", "m4a", "pdf", "doc", "docx", "xls", "xlsx", "txt", "ppt", "pptx", "apk")) resultFiles.add(file)
                             FileCategory.LARGE_FILES -> if (file.length() >= threshold) resultFiles.add(file)
                             else -> {}
                         }
                     }
                 }
             }
-
+            
             searchDirectory(rootDir)
-
+            
             launch(Dispatchers.Main) {
                 allScannedFiles = if (category == FileCategory.LARGE_FILES) {
-                    if (_largeFileSort.value == LargeFileSort.DESCENDING) resultFiles.sortedByDescending { it.length() }
-                    else resultFiles.sortedBy { it.length() }
+                    resultFiles.sortedByDescending { it.length() }
                 } else {
                     resultFiles
                 }
@@ -852,12 +779,6 @@ class FileManagerViewModel : ViewModel() {
     fun navigateUp(): Boolean {
         if (_isSearchActive.value) {
             closeSearch()
-            return true
-        }
-
-        if (_selectedMediaFolder.value != null) {
-            _selectedMediaFolder.value = null
-            scanMediaByFolders(_currentCategory.value)
             return true
         }
 
@@ -940,7 +861,7 @@ class FileManagerViewModel : ViewModel() {
         }
         if (successCount > 0) {
             if (isCutOperation) clearClipboard()
-            refreshCurrentCategoryView()
+            if (_currentCategory.value == FileCategory.ALL || _currentCategory.value == FileCategory.TRASH) loadFiles() else setCategory(_currentCategory.value)
             return true
         }
         return false
@@ -950,18 +871,6 @@ class FileManagerViewModel : ViewModel() {
         clipboardFiles = emptyList()
         isCutOperation = false
         _hasClipboardData.value = false
-    }
-
-    fun refreshCurrentCategoryView() {
-        if (_selectedMediaFolder.value != null) {
-            selectMediaFolder(_selectedMediaFolder.value!!, _currentCategory.value)
-        } else if (_isSearchActive.value && _searchQuery.value.isNotBlank()) {
-            searchGlobally(_searchQuery.value)
-        } else if (_currentCategory.value == FileCategory.ALL || _currentCategory.value == FileCategory.TRASH) {
-            loadFiles()
-        } else {
-            scanAllFilesByCategory(_currentCategory.value)
-        }
     }
 
     fun deleteSelectedFiles(permanent: Boolean = false) {
@@ -976,20 +885,27 @@ class FileManagerViewModel : ViewModel() {
             }
         }
         clearSelection()
-        refreshCurrentCategoryView()
+
+        if (_isSearchActive.value && _searchQuery.value.isNotBlank()) {
+            searchGlobally(_searchQuery.value)
+        } else if (_currentCategory.value == FileCategory.ALL || _currentCategory.value == FileCategory.TRASH) {
+            loadFiles()
+        } else {
+            scanAllFilesByCategory(_currentCategory.value)
+        }
     }
 
     fun restoreSelectedFiles() {
         val destDir = Environment.getExternalStorageDirectory()
         _selectedFiles.value.forEach { file -> file.renameTo(File(destDir, file.name)) }
         clearSelection()
-        refreshCurrentCategoryView()
+        loadFiles()
     }
 
     fun renameFile(file: File, newName: String) {
         val newFile = File(file.parent, newName)
         if (file.renameTo(newFile)) {
-            refreshCurrentCategoryView()
+            if (_currentCategory.value == FileCategory.ALL) loadFiles() else setCategory(_currentCategory.value)
         }
     }
 
@@ -997,7 +913,7 @@ class FileManagerViewModel : ViewModel() {
         if (_selectedFiles.value.isEmpty()) return
         val targetDir = if (_currentCategory.value == FileCategory.ALL) _currentDirectory.value else Environment.getExternalStorageDirectory()
         val zipFile = File(targetDir, if (zipName.endsWith(".zip")) zipName else "$zipName.zip")
-
+        
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 ZipOutputStream(FileOutputStream(zipFile)).use { zos ->
@@ -1005,7 +921,7 @@ class FileManagerViewModel : ViewModel() {
                 }
                 launch(Dispatchers.Main) {
                     clearSelection()
-                    refreshCurrentCategoryView()
+                    if (_currentCategory.value == FileCategory.ALL) loadFiles() else setCategory(_currentCategory.value)
                     Toast.makeText(context, "ZIP creado", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
@@ -1060,7 +976,7 @@ class FileManagerViewModel : ViewModel() {
                     zis.closeEntry()
                 }
                 launch(Dispatchers.Main) {
-                    refreshCurrentCategoryView()
+                    if (_currentCategory.value == FileCategory.ALL || _currentCategory.value == FileCategory.TRASH) loadFiles() else setCategory(_currentCategory.value)
                     Toast.makeText(context, "Extraído en: ${destDir.name}", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
@@ -1076,34 +992,10 @@ class FileManagerViewModel : ViewModel() {
                 return
             }
 
-            val extension = file.extension.lowercase(Locale.getDefault())
+            val extension = file.extension.lowercase()
 
-            // Visor Externo para Imágenes (Lanza la Galería del sistema)
-            if (extension in listOf("jpg", "jpeg", "gif", "bmp")) {
-                val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
-                val intent = Intent(Intent.ACTION_VIEW).apply {
-                    setDataAndType(uri, "image/*")
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                context.startActivity(Intent.createChooser(intent, "Abrir imagen con:"))
-                return
-            }
-
-            // Reproductor de Audio o Vídeo
             if (extension in listOf("mp3", "wav", "ogg", "flac", "m4a")) {
                 playAudio(file, context)
-                return
-            }
-
-            if (extension in listOf("mp4", "mkv", "avi", "mov", "webm")) {
-                val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
-                val intent = Intent(Intent.ACTION_VIEW).apply {
-                    setDataAndType(uri, "video/*")
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                context.startActivity(Intent.createChooser(intent, "Reproducir vídeo con:"))
                 return
             }
 
@@ -1135,68 +1027,75 @@ class FileManagerViewModel : ViewModel() {
     }
 }
 
-// ==========================================
-// FUNCIONES AUXILIARES DE SISTEMA
-// ==========================================
-
-// Solución al Error 3192 (Acceso denegado al pasar URI directa)
-fun setAsWallpaperSafe(context: Context, imageFile: File) {
-    try {
-        val wallpaperManager = WallpaperManager.getInstance(context)
-        val bitmap = BitmapFactory.decodeFile(imageFile.absolutePath)
-        
-        if (bitmap != null) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                wallpaperManager.setBitmap(bitmap, null, true, WallpaperManager.FLAG_SYSTEM)
-            } else {
-                wallpaperManager.setBitmap(bitmap)
-            }
-            Toast.makeText(context, "Fondo de pantalla actualizado con éxito", Toast.LENGTH_SHORT).show()
-        } else {
-            Toast.makeText(context, "No se pudo procesar la imagen", Toast.LENGTH_SHORT).show()
-        }
-    } catch (e: Exception) {
-        Toast.makeText(context, "Error al cambiar fondo: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
-    }
-}
-
-fun setAsRingtoneSafe(context: Context, audioFile: File) {
-    try {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.System.canWrite(context)) {
-            val intent = Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS).apply {
-                data = Uri.parse("package:${context.packageName}")
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            context.startActivity(intent)
-            Toast.makeText(context, "Concede permiso para modificar ajustes del sistema", Toast.LENGTH_LONG).show()
-            return
-        }
-
-        val uri = Uri.fromFile(audioFile)
-        RingtoneManager.setActualDefaultRingtoneUri(context, RingtoneManager.TYPE_RINGTONE, uri)
-        Toast.makeText(context, "Tono de llamada actualizado", Toast.LENGTH_SHORT).show()
-    } catch (e: Exception) {
-        Toast.makeText(context, "Error al establecer tono: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
-    }
-}
-
-// ==========================================
-// COMPONENTES UI Y DIÁLOGOS
-// ==========================================
+// --- DIÁLOGO INICIAL DE SOLICITUD DE PERMISOS GENÉRICO ---
 
 @Composable
-fun PermissionDialog(
+fun FullScreenPermissionScreen(
     onRequestPermission: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Permisos requeridos", fontWeight = FontWeight.Bold) },
-        text = { Text("Para poder explorar, organizar y compartir tus archivos y aplicaciones correctamente, la aplicación necesita acceso total al almacenamiento del dispositivo.") },
-        confirmButton = { Button(onClick = onRequestPermission) { Text("Conceder permiso") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } }
-    )
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.background
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Text(
+                text = "🔒",
+                fontSize = 72.sp,
+                modifier = Modifier.padding(bottom = 16.dp)
+            )
+
+            Text(
+                text = "Permisos Necesarios",
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onBackground,
+                textAlign = TextAlign.Center
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Text(
+                text = "Para garantizar el correcto funcionamiento del gestor de archivos, la aplicación necesita acceso total al almacenamiento del dispositivo para organizar, compartir y gestionar tus documentos, audios y aplicaciones.",
+                style = MaterialTheme.typography.bodyLarge,
+                textAlign = TextAlign.Center,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Spacer(modifier = Modifier.height(32.dp))
+
+            Button(
+                onClick = onRequestPermission,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(50.dp),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Text("Conceder acceso total", fontSize = 16.sp)
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            OutlinedButton(
+                onClick = onDismiss,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(50.dp),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Text("Ahora no", fontSize = 16.sp)
+            }
+        }
+    }
 }
+
+// --- COMPOSABLE DEL REPRODUCTOR INTERNO DE AUDIO ---
 
 @Composable
 fun AudioPlayerBar(viewModel: FileManagerViewModel) {
@@ -1207,7 +1106,9 @@ fun AudioPlayerBar(viewModel: FileManagerViewModel) {
 
     if (currentAudio != null) {
         Surface(
-            modifier = Modifier.fillMaxWidth().padding(8.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(8.dp),
             shape = RoundedCornerShape(16.dp),
             color = Color(0xFF1E293B),
             shadowElevation = 8.dp
@@ -1218,7 +1119,10 @@ fun AudioPlayerBar(viewModel: FileManagerViewModel) {
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         Text("🎵", fontSize = 28.sp, modifier = Modifier.padding(end = 8.dp))
                         Column {
                             Text(
@@ -1238,7 +1142,9 @@ fun AudioPlayerBar(viewModel: FileManagerViewModel) {
                     }
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = { if (isPlaying) viewModel.pauseAudio() else viewModel.resumeAudio() }) {
+                        IconButton(onClick = {
+                            if (isPlaying) viewModel.pauseAudio() else viewModel.resumeAudio()
+                        }) {
                             Text(if (isPlaying) "⏸️" else "▶️", fontSize = 24.sp)
                         }
                         IconButton(onClick = { viewModel.stopAndCloseAudio() }) {
@@ -1257,7 +1163,9 @@ fun AudioPlayerBar(viewModel: FileManagerViewModel) {
                             activeTrackColor = Color(0xFF38BDF8),
                             inactiveTrackColor = Color.Gray
                         ),
-                        modifier = Modifier.fillMaxWidth().height(20.dp)
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(20.dp)
                     )
                 }
             }
@@ -1272,9 +1180,11 @@ fun formatTime(ms: Long): String {
     return String.format("%02d:%02d", minutes, seconds)
 }
 
+// --- GENERADOR DE MINIATURAS (PDF y APK) ---
+
 @Composable
 fun PdfThumbnail(file: File, modifier: Modifier = Modifier) {
-    var bitmap by remember(file) { mutableStateOf<android.graphics.Bitmap?>(null) }
+    var bitmap by remember(file) { mutableStateOf<Bitmap?>(null) }
 
     LaunchedEffect(file) {
         withContext(Dispatchers.IO) {
@@ -1283,14 +1193,16 @@ fun PdfThumbnail(file: File, modifier: Modifier = Modifier) {
                 val renderer = PdfRenderer(pfd)
                 if (renderer.pageCount > 0) {
                     val page = renderer.openPage(0)
-                    val bmp = android.graphics.Bitmap.createBitmap(page.width / 2, page.height / 2, android.graphics.Bitmap.Config.ARGB_8888)
+                    val bmp = Bitmap.createBitmap(page.width / 2, page.height / 2, Bitmap.Config.ARGB_8888)
                     page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                     page.close()
                     renderer.close()
                     pfd.close()
                     bitmap = bmp
                 }
-            } catch (e: Exception) { bitmap = null }
+            } catch (e: Exception) {
+                bitmap = null
+            }
         }
     }
 
@@ -1308,7 +1220,7 @@ fun PdfThumbnail(file: File, modifier: Modifier = Modifier) {
 
 @Composable
 fun ApkIconThumbnail(file: File, context: Context, modifier: Modifier = Modifier) {
-    var iconBitmap by remember(file) { mutableStateOf<android.graphics.Bitmap?>(null) }
+    var iconBitmap by remember(file) { mutableStateOf<Bitmap?>(null) }
 
     LaunchedEffect(file) {
         withContext(Dispatchers.IO) {
@@ -1320,9 +1232,13 @@ fun ApkIconThumbnail(file: File, context: Context, modifier: Modifier = Modifier
                     appInfo.sourceDir = file.absolutePath
                     appInfo.publicSourceDir = file.absolutePath
                     val drawable = appInfo.loadIcon(pm)
-                    if (drawable is BitmapDrawable) iconBitmap = drawable.bitmap
+                    if (drawable is BitmapDrawable) {
+                        iconBitmap = drawable.bitmap
+                    }
                 }
-            } catch (e: Exception) { iconBitmap = null }
+            } catch (e: Exception) {
+                iconBitmap = null
+            }
         }
     }
 
@@ -1338,6 +1254,8 @@ fun ApkIconThumbnail(file: File, context: Context, modifier: Modifier = Modifier
     }
 }
 
+// --- SUBMENÚ LATERAL ---
+
 @Composable
 fun DrawerContent(viewModel: FileManagerViewModel, context: Context, onCloseDrawer: () -> Unit) {
     val currentCategory by viewModel.currentCategory.collectAsState()
@@ -1346,7 +1264,11 @@ fun DrawerContent(viewModel: FileManagerViewModel, context: Context, onCloseDraw
         drawerContainerColor = Color(0xFFF7F9FC),
         drawerContentColor = Color(0xFF1A1C1E)
     ) {
-        LazyColumn(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
+        ) {
             item {
                 Text(
                     text = "Gestor de Archivos",
@@ -1355,6 +1277,7 @@ fun DrawerContent(viewModel: FileManagerViewModel, context: Context, onCloseDraw
                     color = Color(0xFF1A1C1E),
                     modifier = Modifier.padding(vertical = 12.dp, horizontal = 4.dp)
                 )
+
                 HorizontalDivider(color = Color(0xFFE1E2E5), modifier = Modifier.padding(bottom = 12.dp))
             }
 
@@ -1391,27 +1314,11 @@ fun DrawerContent(viewModel: FileManagerViewModel, context: Context, onCloseDraw
                     shape = RoundedCornerShape(12.dp)
                 )
             }
-
-            item {
-                Spacer(modifier = Modifier.height(16.dp))
-                Text("Vínculo con la Nube", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, modifier = Modifier.padding(vertical = 8.dp))
-            }
-
-            val cloudItems = listOf("Google Drive" to "☁️", "Dropbox" to "📦", "pCloud" to "🌩️", "OneDrive" to "🔷", "iCloud" to "☁️", "Sync" to "🔄")
-            items(cloudItems) { (name, icon) ->
-                NavigationDrawerItem(
-                    label = { Text("$icon  $name") },
-                    selected = false,
-                    onClick = {
-                        Toast.makeText(context, "Conectando con $name...", Toast.LENGTH_SHORT).show()
-                        onCloseDrawer()
-                    },
-                    shape = RoundedCornerShape(12.dp)
-                )
-            }
         }
     }
 }
+
+// --- PANTALLA COMPLETA DE BÚSQUEDA ---
 
 @Composable
 fun FullScreenSearchView(
@@ -1427,10 +1334,20 @@ fun FullScreenSearchView(
     val viewMode by viewModel.viewMode.collectAsState()
     val focusRequester = remember { FocusRequester() }
 
-    LaunchedEffect(Unit) { focusRequester.requestFocus() }
+    LaunchedEffect(Unit) {
+        focusRequester.requestFocus()
+    }
 
-    Column(modifier = Modifier.fillMaxSize().background(Color.White).padding(16.dp)) {
-        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.White)
+            .padding(16.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             IconButton(onClick = { viewModel.closeSearch() }) {
                 Text("←", fontSize = 24.sp, color = Color(0xFF1A1C1E))
             }
@@ -1447,7 +1364,9 @@ fun FullScreenSearchView(
                         }
                     }
                 },
-                modifier = Modifier.fillMaxWidth().focusRequester(focusRequester),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .focusRequester(focusRequester),
                 singleLine = true,
                 shape = RoundedCornerShape(24.dp),
                 colors = OutlinedTextFieldDefaults.colors(
@@ -1464,77 +1383,54 @@ fun FullScreenSearchView(
         if (viewMode == ViewMode.LIST) {
             LazyColumn(modifier = Modifier.fillMaxSize()) {
                 items(files) { file ->
-                    FileListItem(file, isSelectionMode, selectedFiles.contains(file), viewModel, context, onRename, onShowDetails)
+                    FileListItem(
+                        file = file,
+                        isSelectionMode = isSelectionMode,
+                        isSelected = selectedFiles.contains(file),
+                        viewModel = viewModel,
+                        context = context,
+                        onRename = onRename,
+                        onShowDetails = onShowDetails
+                    )
                 }
             }
         } else {
             LazyVerticalGrid(columns = GridCells.Fixed(3), modifier = Modifier.fillMaxSize()) {
                 items(files) { file ->
-                    FileGridItem(file, isSelectionMode, selectedFiles.contains(file), viewModel, context, onShowDetails)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun MediaFolderGridScreen(viewModel: FileManagerViewModel, category: FileCategory) {
-    val folders by viewModel.mediaFolders.collectAsState()
-
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(3),
-        modifier = Modifier.fillMaxSize().padding(8.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        items(folders) { group ->
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { viewModel.selectMediaFolder(group.folderFile, category) },
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFFF0F4F8))
-            ) {
-                Column(
-                    modifier = Modifier.padding(8.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    AsyncImage(
-                        model = group.sampleFile,
-                        contentDescription = group.folderName,
-                        modifier = Modifier
-                            .size(90.dp)
-                            .clip(RoundedCornerShape(8.dp)),
-                        contentScale = ContentScale.Crop
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = "${group.folderName} (${group.itemCount})",
-                        style = MaterialTheme.typography.bodySmall,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                    FileGridItem(
+                        file = file,
+                        isSelectionMode = isSelectionMode,
+                        isSelected = selectedFiles.contains(file),
+                        viewModel = viewModel,
+                        context = context,
+                        onShowDetails = onShowDetails
                     )
                 }
             }
         }
     }
 }
+
+// --- VISTA DETALLADA DE ANÁLISIS DE ALMACENAMIENTO ---
 
 @Composable
 fun StorageAnalysisScreen(viewModel: FileManagerViewModel) {
     val stats by viewModel.storageStats.collectAsState()
     val categoryStats by viewModel.categorySizeStats.collectAsState()
+    val installedApps by viewModel.installedApps.collectAsState()
     val largeFiles by viewModel.largeFiles.collectAsState()
-    val threshold by viewModel.largeFileThreshold.collectAsState()
     val duplicateGroups by viewModel.duplicateFiles.collectAsState()
+    val threshold by viewModel.largeFileThreshold.collectAsState()
     val context = LocalContext.current
 
     LaunchedEffect(Unit) {
         viewModel.setCategory(FileCategory.STORAGE_ANALYSIS, context)
     }
 
-    LazyColumn(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
         item {
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -1542,7 +1438,11 @@ fun StorageAnalysisScreen(viewModel: FileManagerViewModel) {
                 shape = RoundedCornerShape(16.dp)
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         Text("Almacenamiento...", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                         Text("${viewModel.formatSize(stats.freeBytes)} disponible", color = Color(0xFF00796B), fontWeight = FontWeight.SemiBold)
                     }
@@ -1576,6 +1476,62 @@ fun StorageAnalysisScreen(viewModel: FileManagerViewModel) {
         }
 
         item {
+            val totalAppsSize = installedApps.sumOf { it.sizeBytes }
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFFF7F9FC)),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Aplicaciones", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        Text(viewModel.formatSize(totalAppsSize), color = Color(0xFF00796B), fontWeight = FontWeight.SemiBold)
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    installedApps.take(3).forEach { app ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                if (app.icon != null) {
+                                    val bitmap = (app.icon as? BitmapDrawable)?.bitmap
+                                    if (bitmap != null) {
+                                        Image(
+                                            bitmap = bitmap.asImageBitmap(),
+                                            contentDescription = app.name,
+                                            modifier = Modifier.size(32.dp).padding(end = 8.dp)
+                                        )
+                                    } else {
+                                        Text("📱", fontSize = 24.sp, modifier = Modifier.padding(end = 8.dp))
+                                    }
+                                } else {
+                                    Text("📱", fontSize = 24.sp, modifier = Modifier.padding(end = 8.dp))
+                                }
+                                Text(app.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            Text(viewModel.formatSize(app.sizeBytes), style = MaterialTheme.typography.bodyMedium, color = Color(0xFF00796B))
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+                    TextButton(
+                        onClick = { viewModel.setCategory(FileCategory.APPS, context, fromStorageAnalysis = true) },
+                        modifier = Modifier.align(Alignment.CenterHorizontally)
+                    ) {
+                        Text("VER MÁS", fontWeight = FontWeight.Bold, color = Color(0xFF1A1C1E))
+                    }
+                }
+            }
+        }
+
+        item {
             val totalLargeSize = largeFiles.sumOf { it.length() }
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -1583,15 +1539,23 @@ fun StorageAnalysisScreen(viewModel: FileManagerViewModel) {
                 shape = RoundedCornerShape(16.dp)
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        Text("Archivos pesados", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Archivos grandes", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                         Text(viewModel.formatSize(totalLargeSize), color = Color(0xFF00796B), fontWeight = FontWeight.SemiBold)
                     }
                     Text("Archivos mayores a ${viewModel.formatSize(threshold)}", style = MaterialTheme.typography.labelSmall, color = Color(0xFF72777D))
                     Spacer(modifier = Modifier.height(12.dp))
 
                     largeFiles.take(3).forEach { file ->
-                        Row(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(file.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Text(file.parent ?: "", style = MaterialTheme.typography.labelSmall, color = Color(0xFF72777D), maxLines = 1)
@@ -1601,8 +1565,11 @@ fun StorageAnalysisScreen(viewModel: FileManagerViewModel) {
                     }
 
                     Spacer(modifier = Modifier.height(8.dp))
-                    TextButton(onClick = { viewModel.setCategory(FileCategory.LARGE_FILES, context, fromStorageAnalysis = true) }, modifier = Modifier.align(Alignment.CenterHorizontally)) {
-                        Text("MAS DETALLES", fontWeight = FontWeight.Bold, color = Color(0xFF1A1C1E))
+                    TextButton(
+                        onClick = { viewModel.setCategory(FileCategory.LARGE_FILES, context, fromStorageAnalysis = true) },
+                        modifier = Modifier.align(Alignment.CenterHorizontally)
+                    ) {
+                        Text("VER MÁS", fontWeight = FontWeight.Bold, color = Color(0xFF1A1C1E))
                     }
                 }
             }
@@ -1616,7 +1583,11 @@ fun StorageAnalysisScreen(viewModel: FileManagerViewModel) {
                 shape = RoundedCornerShape(16.dp)
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         Text("Archivos duplicados", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                         Text(viewModel.formatSize(totalDupSize), color = Color(0xFF00796B), fontWeight = FontWeight.SemiBold)
                     }
@@ -1624,7 +1595,11 @@ fun StorageAnalysisScreen(viewModel: FileManagerViewModel) {
 
                     duplicateGroups.take(2).forEach { group ->
                         group.files.take(2).forEach { file ->
-                            Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(file.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     Text(file.parent ?: "", style = MaterialTheme.typography.labelSmall, color = Color(0xFF72777D), maxLines = 1)
@@ -1635,104 +1610,19 @@ fun StorageAnalysisScreen(viewModel: FileManagerViewModel) {
                     }
 
                     Spacer(modifier = Modifier.height(8.dp))
-                    TextButton(onClick = { viewModel.setCategory(FileCategory.DUPLICATES, context, fromStorageAnalysis = true) }, modifier = Modifier.align(Alignment.CenterHorizontally)) {
-                        Text("MAS DETALLES", fontWeight = FontWeight.Bold, color = Color(0xFF1A1C1E))
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun LargeFilesScreen(viewModel: FileManagerViewModel) {
-    val largeFiles by viewModel.files.collectAsState()
-    val threshold by viewModel.largeFileThreshold.collectAsState()
-    val sortOrder by viewModel.largeFileSort.collectAsState()
-    var expanded by remember { mutableStateOf(false) }
-    val context = LocalContext.current
-
-    val options = listOf(
-        "100 MB" to 100L * 1024 * 1024,
-        "250 MB" to 250L * 1024 * 1024,
-        "500 MB" to 500L * 1024 * 1024,
-        "1 GB" to 1024L * 1024 * 1024
-    )
-
-    val sortedList = remember(largeFiles, sortOrder) {
-        if (sortOrder == LargeFileSort.DESCENDING) {
-            largeFiles.sortedByDescending { it.length() }
-        } else {
-            largeFiles.sortedBy { it.length() }
-        }
-    }
-
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("Archivos pesados", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                IconButton(onClick = { viewModel.setCategory(FileCategory.LARGE_FILES, context) }) {
-                    Text("🔄", fontSize = 18.sp)
-                }
-
-                IconButton(onClick = { viewModel.toggleLargeFileSort() }) {
-                    Text(if (sortOrder == LargeFileSort.DESCENDING) "⬇️" else "⬆️", fontSize = 18.sp)
-                }
-
-                Box {
-                    OutlinedButton(onClick = { expanded = true }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)) {
-                        Text("≥ ${viewModel.formatSize(threshold)}")
-                    }
-                    DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                        options.forEach { (label, size) ->
-                            DropdownMenuItem(
-                                text = { Text(label) },
-                                onClick = {
-                                    viewModel.setLargeFileThreshold(size)
-                                    expanded = false
-                                }
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        if (sortedList.isEmpty()) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("No hay archivos mayores a ${viewModel.formatSize(threshold)}.")
-            }
-        } else {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(sortedList) { file ->
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { file.parentFile?.let { viewModel.navigateToDirectory(it) } },
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFFF7F9FC)),
-                        shape = RoundedCornerShape(12.dp)
+                    TextButton(
+                        onClick = { viewModel.setCategory(FileCategory.DUPLICATES, context, fromStorageAnalysis = true) },
+                        modifier = Modifier.align(Alignment.CenterHorizontally)
                     ) {
-                        Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text("📄", fontSize = 32.sp, modifier = Modifier.padding(end = 12.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(file.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text(file.parent ?: "", style = MaterialTheme.typography.labelSmall, color = Color(0xFF72777D), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
-                            Text(viewModel.formatSize(file.length()), style = MaterialTheme.typography.bodyMedium, color = Color(0xFF00796B), fontWeight = FontWeight.Bold)
-                        }
+                        Text("VER MÁS", fontWeight = FontWeight.Bold, color = Color(0xFF1A1C1E))
                     }
                 }
             }
         }
     }
 }
+
+// --- PANTALLA DE SERVIDOR FTP CENTRADA ---
 
 @Composable
 fun FtpServerScreen(viewModel: FileManagerViewModel) {
@@ -1740,31 +1630,95 @@ fun FtpServerScreen(viewModel: FileManagerViewModel) {
     val ftpAddress by viewModel.ftpAddress.collectAsState()
     val context = LocalContext.current
 
-    Box(modifier = Modifier.fillMaxSize().padding(16.dp), contentAlignment = Alignment.Center) {
-        Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
+            ) {
                 Text("💻", fontSize = 28.sp, modifier = Modifier.padding(end = 8.dp))
-                Text("Acceso desde PC (Servidor FTP)", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+                Text(
+                    text = "Acceso desde PC (Servidor FTP)",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center
+                )
             }
+            
             Spacer(modifier = Modifier.height(24.dp))
-            Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color(0xFFF0F4F8)), shape = RoundedCornerShape(16.dp)) {
-                Column(modifier = Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+            
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFFF0F4F8)),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
                     if (isRunning) {
-                        Text("Servidor Activo", color = Color(0xFF00796B), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            text = "Servidor Activo",
+                            color = Color(0xFF00796B),
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.titleMedium
+                        )
                         Spacer(modifier = Modifier.height(16.dp))
-                        Text("Introduce esta dirección en el Explorador de Archivos de tu PC:", textAlign = TextAlign.Center, style = MaterialTheme.typography.bodyMedium, color = Color(0xFF42474E))
-                        Text(ftpAddress, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, color = Color(0xFF1A1C1E), modifier = Modifier.padding(vertical = 12.dp))
-                        Text("Usuario: admin", style = MaterialTheme.typography.bodyLarge, color = Color(0xFF1A1C1E))
-                        Text("Contraseña: 1234", style = MaterialTheme.typography.bodyLarge, color = Color(0xFF1A1C1E))
+                        Text(
+                            text = "Introduce esta dirección en el Explorador de Archivos de tu PC:",
+                            textAlign = TextAlign.Center,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = Color(0xFF42474E)
+                        )
+                        Text(
+                            text = ftpAddress,
+                            style = MaterialTheme.typography.headlineSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF1A1C1E),
+                            modifier = Modifier.padding(vertical = 12.dp)
+                        )
+                        Text(
+                            text = "Usuario: admin",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = Color(0xFF1A1C1E)
+                        )
+                        Text(
+                            text = "Contraseña: 1234",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = Color(0xFF1A1C1E)
+                        )
                     } else {
-                        Text("Servidor Detenido", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            text = "Servidor Detenido",
+                            color = MaterialTheme.colorScheme.error,
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.titleMedium
+                        )
                         Spacer(modifier = Modifier.height(16.dp))
-                        Text("Inicia el servidor para acceder a los archivos del dispositivo desde la misma red WiFi.", textAlign = TextAlign.Center, style = MaterialTheme.typography.bodyMedium, color = Color(0xFF42474E))
+                        Text(
+                            text = "Inicia el servidor para acceder a los archivos del dispositivo desde la misma red WiFi.",
+                            textAlign = TextAlign.Center,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = Color(0xFF42474E)
+                        )
                     }
+                    
                     Spacer(modifier = Modifier.height(24.dp))
                     Button(
                         onClick = { viewModel.toggleFtpServer(context) },
-                        colors = ButtonDefaults.buttonColors(containerColor = if (isRunning) Color(0xFF5E35B1) else MaterialTheme.colorScheme.primary)
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isRunning) Color(0xFF5E35B1) else MaterialTheme.colorScheme.primary
+                        )
                     ) {
                         Text(if (isRunning) "Detener Servidor" else "Iniciar Servidor FTP")
                     }
@@ -1777,7 +1731,11 @@ fun FtpServerScreen(viewModel: FileManagerViewModel) {
 @Composable
 fun CategoryItem(title: String, sizeText: String, icon: String, onClick: () -> Unit) {
     Row(
-        modifier = Modifier.width(160.dp).clip(RoundedCornerShape(8.dp)).clickable { onClick() }.padding(8.dp),
+        modifier = Modifier
+            .width(160.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .clickable { onClick() }
+            .padding(8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
@@ -1794,8 +1752,6 @@ fun ActionBottomSheet(
     selectedCount: Int,
     isTrash: Boolean,
     isZipFile: Boolean,
-    isImage: Boolean,
-    isAudio: Boolean,
     onCopy: () -> Unit,
     onCut: () -> Unit,
     onDelete: () -> Unit,
@@ -1805,8 +1761,6 @@ fun ActionBottomSheet(
     onRename: () -> Unit,
     onShare: () -> Unit,
     onRestore: () -> Unit,
-    onSetWallpaper: () -> Unit,
-    onSetRingtone: () -> Unit,
     onDismiss: () -> Unit
 ) {
     Surface(
@@ -1816,8 +1770,17 @@ fun ActionBottomSheet(
         shadowElevation = 8.dp
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text("$selectedCount elemento(s) seleccionado(s)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color(0xFF1A1C1E), modifier = Modifier.padding(bottom = 12.dp))
-            Row(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            Text(
+                text = "$selectedCount elemento(s) seleccionado(s)",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF1A1C1E),
+                modifier = Modifier.padding(bottom = 12.dp)
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
                 if (isTrash) {
                     BottomSheetActionItem("Restaurar", "🔄") { onRestore(); onDismiss() }
                     BottomSheetActionItem("Eliminar", "🗑️") { onDelete() }
@@ -1825,12 +1788,6 @@ fun ActionBottomSheet(
                     if (isZipFile) {
                         BottomSheetActionItem("Extraer aquí", "📂") { onExtractHere(); onDismiss() }
                         BottomSheetActionItem("Extraer en...", "📍") { onExtractTo() }
-                    }
-                    if (isImage && selectedCount == 1) {
-                        BottomSheetActionItem("Fondo de Pantalla", "🖼️") { onSetWallpaper(); onDismiss() }
-                    }
-                    if (isAudio && selectedCount == 1) {
-                        BottomSheetActionItem("Tono de Llamada", "🔔") { onSetRingtone(); onDismiss() }
                     }
                     BottomSheetActionItem("Copiar", "📋") { onCopy(); onDismiss() }
                     BottomSheetActionItem("Cortar", "✂️") { onCut(); onDismiss() }
@@ -1848,14 +1805,21 @@ fun ActionBottomSheet(
 
 @Composable
 fun BottomSheetActionItem(label: String, icon: String, onClick: () -> Unit) {
-    Column(modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { onClick() }.padding(8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+    Column(
+        modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { onClick() }.padding(8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
         Text(icon, fontSize = 28.sp)
         Text(label, style = MaterialTheme.typography.labelSmall, color = Color(0xFF1A1C1E))
     }
 }
 
 @Composable
-fun FolderPickerDialog(currentDirectory: File, onFolderSelected: (File) -> Unit, onDismiss: () -> Unit) {
+fun FolderPickerDialog(
+    currentDirectory: File,
+    onFolderSelected: (File) -> Unit,
+    onDismiss: () -> Unit
+) {
     var navDir by remember { mutableStateOf(currentDirectory) }
     val folderList = remember(navDir) { navDir.listFiles()?.filter { it.isDirectory && !it.name.startsWith(".") } ?: emptyList() }
 
@@ -1869,14 +1833,20 @@ fun FolderPickerDialog(currentDirectory: File, onFolderSelected: (File) -> Unit,
                 LazyColumn(modifier = Modifier.weight(1f)) {
                     item {
                         if (navDir.parentFile != null && navDir.parentFile?.canRead() == true) {
-                            Row(modifier = Modifier.fillMaxWidth().clickable { navDir = navDir.parentFile!! }.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().clickable { navDir = navDir.parentFile!! }.padding(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
                                 Text("⬆️ .. (Volver arriba)", fontWeight = FontWeight.Bold)
                             }
                             HorizontalDivider()
                         }
                     }
                     items(folderList) { folder ->
-                        Row(modifier = Modifier.fillMaxWidth().clickable { navDir = folder }.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().clickable { navDir = folder }.padding(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
                             Text("📁 ${folder.name}")
                         }
                         HorizontalDivider()
@@ -1884,8 +1854,12 @@ fun FolderPickerDialog(currentDirectory: File, onFolderSelected: (File) -> Unit,
                 }
             }
         },
-        confirmButton = { TextButton(onClick = { onFolderSelected(navDir) }) { Text("Extraer aquí") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } }
+        confirmButton = {
+            TextButton(onClick = { onFolderSelected(navDir) }) { Text("Extraer aquí") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancelar") }
+        }
     )
 }
 
@@ -1901,17 +1875,29 @@ fun PathBreadcrumbs(currentDir: File?, onPathClick: (File) -> Unit) {
         segments
     }
 
-    Row(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
         pathSegments.forEachIndexed { index, file ->
             val displayName = if (file.path == "/") "Raíz (/)" else if (file.name == "0" && file.parent?.endsWith("emulated") == true) "Almacenamiento" else file.name
+            
             Text(
                 text = displayName,
                 fontWeight = if (index == pathSegments.lastIndex) FontWeight.Bold else FontWeight.Normal,
                 color = if (index == pathSegments.lastIndex) MaterialTheme.colorScheme.primary else Color(0xFF1A1C1E),
-                modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable { onPathClick(file) }.padding(horizontal = 6.dp, vertical = 4.dp),
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .clickable { onPathClick(file) }
+                    .padding(horizontal = 6.dp, vertical = 4.dp),
                 style = MaterialTheme.typography.bodyMedium
             )
-            if (index < pathSegments.lastIndex) Text(" > ", color = Color(0xFF72777D), fontSize = 14.sp)
+            if (index < pathSegments.lastIndex) {
+                Text(" > ", color = Color(0xFF72777D), fontSize = 14.sp)
+            }
         }
     }
 }
@@ -1929,8 +1915,12 @@ fun FileDetailsDialog(file: File, onDismiss: () -> Unit) {
                 Text("Nombre: ${file.name}", fontWeight = FontWeight.Bold)
                 Text("Ruta: ${file.absolutePath}", style = MaterialTheme.typography.bodySmall)
                 Text("Tipo: ${if (file.isDirectory) "Carpeta" else file.extension.ifEmpty { "Desconocido" }}")
-                if (file.isFile) Text("Tamaño: ${file.length()} bytes (${String.format("%.2f MB", file.length() / (1024.0 * 1024.0))})")
-                else Text("Contenido: ${(file.listFiles()?.size ?: 0)} elementos")
+                if (file.isFile) {
+                    Text("Tamaño: ${file.length()} bytes (${String.format("%.2f MB", file.length() / (1024.0 * 1024.0))})")
+                } else {
+                    val count = file.listFiles()?.size ?: 0
+                    Text("Contenido: $count elementos")
+                }
                 Text("Última Modificación: $lastModifiedStr")
                 Text("Permisos: ${if (file.canRead()) "R" else ""}${if (file.canWrite()) "W" else ""}")
             }
@@ -1939,6 +1929,8 @@ fun FileDetailsDialog(file: File, onDismiss: () -> Unit) {
     )
 }
 
+// --- PANTALLA DE ARCHIVOS DUPLICADOS (SIN ICONO Y CON NAVEGACIÓN A UBICACIÓN) ---
+
 @Composable
 fun DuplicatesScreen(viewModel: FileManagerViewModel) {
     val duplicates by viewModel.duplicateFiles.collectAsState()
@@ -1946,10 +1938,14 @@ fun DuplicatesScreen(viewModel: FileManagerViewModel) {
     val context = LocalContext.current
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Text("Archivos Duplicados", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             Button(onClick = { viewModel.scanForDuplicates(context) }, enabled = !isScanning) {
-                Text(if (isScanning) "Escaneando..." else "🔄 Re-escanear")
+                Text(if (isScanning) "Escaneando..." else "Re-escanear")
             }
         }
         Spacer(modifier = Modifier.height(12.dp))
@@ -1957,28 +1953,38 @@ fun DuplicatesScreen(viewModel: FileManagerViewModel) {
         if (isScanning) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
         } else if (duplicates.isEmpty()) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("No se encontraron archivos duplicados por nombre.") }
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("No se encontraron archivos duplicados.") }
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 items(duplicates) { group ->
                     Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { viewModel.openAndSelectDuplicates(group) },
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFFF0F4F8)),
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFFF7F9FC)),
                         shape = RoundedCornerShape(12.dp)
                     ) {
                         Column(modifier = Modifier.padding(12.dp)) {
-                            Text("Nombre: ${group.fileName} (${group.files.size} copias)", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                            Text(
+                                "Tamaño: ${viewModel.formatSize(group.fileSize)} por archivo (${group.files.size} copias)",
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
                             Spacer(modifier = Modifier.height(6.dp))
                             group.files.forEach { file ->
                                 Row(
-                                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { 
+                                            // Navega a la carpeta que contiene el archivo
+                                            file.parentFile?.let { parentDir ->
+                                                viewModel.navigateToDirectory(parentDir)
+                                            }
+                                        }
+                                        .padding(vertical = 8.dp),
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Column(modifier = Modifier.weight(1f)) {
-                                        Text(file.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+                                        Text(file.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, maxLines = 1)
                                         Text(file.parent ?: "", style = MaterialTheme.typography.labelSmall, color = Color(0xFF72777D), maxLines = 1)
                                     }
                                     IconButton(onClick = { if (file.delete()) viewModel.scanForDuplicates(context) }) { Text("🗑️") }
@@ -1993,9 +1999,83 @@ fun DuplicatesScreen(viewModel: FileManagerViewModel) {
     }
 }
 
-// ==========================================
-// PANTALLA PRINCIPAL
-// ==========================================
+// --- PANTALLA DE ARCHIVOS GRANDES (CON DESPLEGABLE) ---
+@Composable
+fun LargeFilesScreen(viewModel: FileManagerViewModel) {
+    val largeFiles by viewModel.files.collectAsState()
+    val threshold by viewModel.largeFileThreshold.collectAsState()
+    var expanded by remember { mutableStateOf(false) }
+
+    val options = listOf(
+        "50 MB" to 50L * 1024 * 1024,
+        "100 MB" to 100L * 1024 * 1024,
+        "300 MB" to 300L * 1024 * 1024,
+        "500 MB" to 500L * 1024 * 1024,
+        "1 GB" to 1024L * 1024 * 1024
+    )
+
+    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Archivos grandes", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            
+            Box {
+                OutlinedButton(onClick = { expanded = true }) {
+                    Text("> ${viewModel.formatSize(threshold)}")
+                }
+                DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                    options.forEach { (label, size) ->
+                        DropdownMenuItem(
+                            text = { Text(label) },
+                            onClick = {
+                                viewModel.setLargeFileThreshold(size)
+                                expanded = false
+                            }
+                        )
+                    }
+                }
+            }
+        }
+        
+        Spacer(modifier = Modifier.height(12.dp))
+        
+        if (largeFiles.isEmpty()) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { 
+                Text("No hay archivos mayores a ${viewModel.formatSize(threshold)}.") 
+            }
+        } else {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(largeFiles) { file ->
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                // Navega a la ubicación original del archivo
+                                file.parentFile?.let { viewModel.navigateToDirectory(it) }
+                            },
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFFF7F9FC)),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("📄", fontSize = 32.sp, modifier = Modifier.padding(end = 12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(file.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(file.parent ?: "", style = MaterialTheme.typography.labelSmall, color = Color(0xFF72777D), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            Text(viewModel.formatSize(file.length()), style = MaterialTheme.typography.bodyMedium, color = Color(0xFF00796B), fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -2008,17 +2088,40 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
     val selectedFiles by viewModel.selectedFiles.collectAsState()
     val currentCategory by viewModel.currentCategory.collectAsState()
     val viewMode by viewModel.viewMode.collectAsState()
-    val sortOption by viewModel.sortOption.collectAsState()
+    val currentSort by viewModel.sortOption.collectAsState()
     val showHidden by viewModel.showHiddenFiles.collectAsState()
     val isSearchActive by viewModel.isSearchActive.collectAsState()
-    val selectedMediaFolder by viewModel.selectedMediaFolder.collectAsState()
-
+    
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val coroutineScope = rememberCoroutineScope()
 
     var showPermissionDialog by remember { mutableStateOf(false) }
-    var showWallpaperConfirm by remember { mutableStateOf<File?>(null) }
+
+    fun checkStoragePermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Environment.isExternalStorageManager()
+        } else {
+            true
+        }
+    }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                showPermissionDialog = !checkStoragePermission()
+                if (!showPermissionDialog) {
+                    viewModel.calculateStorageStats(context)
+                    viewModel.loadFiles()
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
     var showCreateFolderDialog by remember { mutableStateOf(false) }
@@ -2030,14 +2133,7 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
     var showZipDialog by remember { mutableStateOf(false) }
     var zipFileName by remember { mutableStateOf("") }
 
-    LaunchedEffect(Unit) {
-        viewModel.calculateStorageStats(context)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()) {
-            showPermissionDialog = true
-        }
-    }
-
-    val isRoot = currentDir?.parentFile == null && currentCategory == FileCategory.ALL && selectedMediaFolder == null
+    val isRoot = currentDir?.parentFile == null && currentCategory == FileCategory.ALL
 
     BackHandler(enabled = !isRoot || isSelectionMode || drawerState.isOpen || isSearchActive) {
         if (drawerState.isOpen) {
@@ -2052,9 +2148,8 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
     }
 
     if (showPermissionDialog) {
-        PermissionDialog(
+        FullScreenPermissionScreen(
             onRequestPermission = {
-                showPermissionDialog = false
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
                         data = Uri.parse("package:${context.packageName}")
@@ -2062,23 +2157,9 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
                     context.startActivity(intent)
                 }
             },
-            onDismiss = { showPermissionDialog = false }
-        )
-    }
-
-    if (showWallpaperConfirm != null) {
-        AlertDialog(
-            onDismissRequest = { showWallpaperConfirm = null },
-            title = { Text("Fondo de pantalla", fontWeight = FontWeight.Bold) },
-            text = { Text("¿Estás seguro de que deseas establecer esta imagen como fondo de pantalla?") },
-            confirmButton = {
-                TextButton(onClick = {
-                    showWallpaperConfirm?.let { setAsWallpaperSafe(context, it) }
-                    showWallpaperConfirm = null
-                }) { Text("Establecer") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showWallpaperConfirm = null }) { Text("Cancelar") }
+            onDismiss = {
+                showPermissionDialog = false
+                (context as? ComponentActivity)?.finish()
             }
         )
     }
@@ -2087,7 +2168,14 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
         AlertDialog(
             onDismissRequest = { showCreateFolderDialog = false },
             title = { Text("Nueva carpeta") },
-            text = { OutlinedTextField(value = folderNameInput, onValueChange = { folderNameInput = it }, label = { Text("Nombre de la carpeta") }, singleLine = true) },
+            text = {
+                OutlinedTextField(
+                    value = folderNameInput,
+                    onValueChange = { folderNameInput = it },
+                    label = { Text("Nombre de la carpeta") },
+                    singleLine = true
+                )
+            },
             confirmButton = {
                 TextButton(onClick = {
                     viewModel.createNewFolder(folderNameInput, context)
@@ -2095,7 +2183,9 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
                     showCreateFolderDialog = false
                 }) { Text("Crear") }
             },
-            dismissButton = { TextButton(onClick = { showCreateFolderDialog = false }) { Text("Cancelar") } }
+            dismissButton = {
+                TextButton(onClick = { showCreateFolderDialog = false }) { Text("Cancelar") }
+            }
         )
     }
 
@@ -2157,7 +2247,9 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
         FolderPickerDialog(
             currentDirectory = currentDir ?: Environment.getExternalStorageDirectory(),
             onFolderSelected = { selectedFolder ->
-                showFolderPickerForZip?.let { zipFile -> viewModel.unzipToDirectory(zipFile, selectedFolder, context) }
+                showFolderPickerForZip?.let { zipFile ->
+                    viewModel.unzipToDirectory(zipFile, selectedFolder, context)
+                }
                 showFolderPickerForZip = null
             },
             onDismiss = { showFolderPickerForZip = null }
@@ -2166,7 +2258,11 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
 
     ModalNavigationDrawer(
         drawerState = drawerState,
-        drawerContent = { DrawerContent(viewModel = viewModel, context = context) { coroutineScope.launch { drawerState.close() } } }
+        drawerContent = {
+            DrawerContent(viewModel = viewModel, context = context) {
+                coroutineScope.launch { drawerState.close() }
+            }
+        }
     ) {
         Scaffold(
             topBar = {
@@ -2176,31 +2272,38 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
                             Text(
                                 when (currentCategory) {
                                     FileCategory.STORAGE_ANALYSIS -> "Análisis de almacenamiento"
-                                    FileCategory.LARGE_FILES -> "Archivos pesados"
+                                    FileCategory.LARGE_FILES -> "Archivos grandes"
                                     FileCategory.DUPLICATES -> "Archivos duplicados"
-                                    FileCategory.APPS -> "Aplicaciones"
+                                    FileCategory.APPS -> "Apps"
                                     FileCategory.FTP_SERVER -> "PC (Servidor FTP)"
-                                    FileCategory.IMAGES -> "Imágenes"
-                                    FileCategory.VIDEOS -> "Vídeos"
-                                    FileCategory.AUDIO -> "Audio"
                                     else -> "Gestor de Archivos"
                                 },
-                                fontWeight = FontWeight.SemiBold, color = Color(0xFF1A1C1E)
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color(0xFF1A1C1E)
                             )
                         },
                         navigationIcon = {
-                            IconButton(onClick = { coroutineScope.launch { drawerState.open() } }) { Text("☰", fontSize = 24.sp, color = Color(0xFF1A1C1E)) }
+                            IconButton(onClick = { coroutineScope.launch { drawerState.open() } }) {
+                                Text("☰", fontSize = 24.sp, color = Color(0xFF1A1C1E))
+                            }
                         },
                         actions = {
-                            IconButton(onClick = { viewModel.openSearch() }) { Text("🔍", fontSize = 20.sp) }
+                            IconButton(onClick = { viewModel.openSearch() }) {
+                                Text("🔍", fontSize = 20.sp)
+                            }
                             Box {
-                                IconButton(onClick = { showMenu = true }) { Text("⋮", fontSize = 22.sp, fontWeight = FontWeight.Bold) }
-                                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                                IconButton(onClick = { showMenu = true }) {
+                                    Text("⋮", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                                }
+                                DropdownMenu(
+                                    expanded = showMenu,
+                                    onDismissRequest = { showMenu = false }
+                                ) {
                                     DropdownMenuItem(
                                         text = {
                                             Row(verticalAlignment = Alignment.CenterVertically) {
                                                 Text("Cuadrícula", modifier = Modifier.weight(1f))
-                                                if (viewMode == ViewMode.GRID) Text("✓", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                                                if (viewMode == ViewMode.GRID) Text("✓", color = MaterialTheme.colorScheme.primary)
                                             }
                                         },
                                         onClick = { viewModel.setViewMode(ViewMode.GRID); showMenu = false }
@@ -2209,42 +2312,29 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
                                         text = {
                                             Row(verticalAlignment = Alignment.CenterVertically) {
                                                 Text("Lista", modifier = Modifier.weight(1f))
-                                                if (viewMode == ViewMode.LIST) Text("✓", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                                                if (viewMode == ViewMode.LIST) Text("✓", color = MaterialTheme.colorScheme.primary)
                                             }
                                         },
                                         onClick = { viewModel.setViewMode(ViewMode.LIST); showMenu = false }
                                     )
                                     HorizontalDivider()
                                     DropdownMenuItem(
-                                        text = {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Text("Nombre (A-Z)", modifier = Modifier.weight(1f))
-                                                if (sortOption == SortOption.NAME_ASC) Text("✓", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-                                            }
-                                        },
-                                        onClick = { viewModel.setSortOption(SortOption.NAME_ASC); showMenu = false }
-                                    )
-                                    DropdownMenuItem(
-                                        text = {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Text("Fecha (Más reciente)", modifier = Modifier.weight(1f))
-                                                if (sortOption == SortOption.DATE_DESC) Text("✓", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-                                            }
-                                        },
+                                        text = { Text("Ordenar por Fecha") },
                                         onClick = { viewModel.setSortOption(SortOption.DATE_DESC); showMenu = false }
                                     )
                                     DropdownMenuItem(
-                                        text = {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Text("Tamaño (Mayor a Menor)", modifier = Modifier.weight(1f))
-                                                if (sortOption == SortOption.SIZE_DESC) Text("✓", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-                                            }
-                                        },
-                                        onClick = { viewModel.setSortOption(SortOption.SIZE_DESC); showMenu = false }
+                                        text = { Text("Ordenar por Nombre") },
+                                        onClick = { viewModel.setSortOption(SortOption.NAME_ASC); showMenu = false }
                                     )
                                     HorizontalDivider()
-                                    DropdownMenuItem(text = { Text(if (showHidden) "Ocultar ocultos" else "Mostrar ocultos") }, onClick = { viewModel.toggleHiddenFiles(); showMenu = false })
-                                    DropdownMenuItem(text = { Text("Crear carpeta") }, onClick = { showMenu = false; showCreateFolderDialog = true })
+                                    DropdownMenuItem(
+                                        text = { Text(if (showHidden) "Ocultar archivos ocultos" else "Mostrar archivos ocultos") },
+                                        onClick = { viewModel.toggleHiddenFiles(); showMenu = false }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Crear carpeta") },
+                                        onClick = { showMenu = false; showCreateFolderDialog = true }
+                                    )
                                 }
                             }
                         },
@@ -2255,30 +2345,31 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
             bottomBar = {
                 Column {
                     AudioPlayerBar(viewModel = viewModel)
+
                     if (isSelectionMode) {
                         val singleSelected = selectedFiles.firstOrNull()
                         val isZip = selectedFiles.size == 1 && singleSelected?.extension?.lowercase() == "zip"
-                        val ext = singleSelected?.extension?.lowercase() ?: ""
-                        val isImg = selectedFiles.size == 1 && ext in listOf("jpg", "jpeg", "gif", "bmp")
-                        val isAud = selectedFiles.size == 1 && ext in listOf("mp3", "wav", "ogg", "flac", "m4a")
 
                         ActionBottomSheet(
                             selectedCount = selectedFiles.size,
                             isTrash = currentCategory == FileCategory.TRASH,
                             isZipFile = isZip,
-                            isImage = isImg,
-                            isAudio = isAud,
                             onCopy = { viewModel.copySelectedFiles() },
                             onCut = { viewModel.cutSelectedFiles() },
                             onDelete = { showDeleteConfirm = true },
                             onZip = { showZipDialog = true },
                             onExtractHere = { singleSelected?.let { viewModel.unzipFileHere(it, context) } },
                             onExtractTo = { showFolderPickerForZip = singleSelected },
-                            onRename = { singleSelected?.let { fileToRename = it; newFileName = it.name } },
-                            onShare = { singleSelected?.let { viewModel.shareFile(context, it) } },
+                            onRename = {
+                                singleSelected?.let {
+                                    fileToRename = it
+                                    newFileName = it.name
+                                }
+                            },
+                            onShare = {
+                                singleSelected?.let { viewModel.shareFile(context, it) }
+                            },
                             onRestore = { viewModel.restoreSelectedFiles() },
-                            onSetWallpaper = { singleSelected?.let { showWallpaperConfirm = it } },
-                            onSetRingtone = { singleSelected?.let { setAsRingtoneSafe(context, it) } },
                             onDismiss = { viewModel.clearSelection() }
                         )
                     }
@@ -2286,49 +2377,95 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
             },
             containerColor = Color.White
         ) { paddingValues ->
-            Box(modifier = Modifier.fillMaxSize().padding(paddingValues)) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(paddingValues)
+            ) {
                 if (isSearchActive) {
                     FullScreenSearchView(
-                        viewModel = viewModel, context = context,
+                        viewModel = viewModel,
+                        context = context,
                         onRename = { fileToRename = it; newFileName = it.name },
                         onShowDetails = { fileForDetails = it }
                     )
                 } else {
-                    Column(modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 16.dp)
+                    ) {
                         if (currentCategory == FileCategory.ALL || currentCategory == FileCategory.TRASH) {
                             PathBreadcrumbs(currentDir = currentDir, onPathClick = { viewModel.navigateToDirectory(it) })
                         }
 
-                        if (currentCategory != FileCategory.DUPLICATES && currentCategory != FileCategory.STORAGE_ANALYSIS && currentCategory != FileCategory.FTP_SERVER) {
+                        if (currentCategory != FileCategory.DUPLICATES && currentCategory != FileCategory.STORAGE_ANALYSIS && currentCategory != FileCategory.FTP_SERVER && currentCategory != FileCategory.LARGE_FILES) {
                             if (hasClipboardData && (currentCategory == FileCategory.ALL || currentCategory == FileCategory.TRASH)) {
                                 Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.End) {
-                                    Button(onClick = { viewModel.pasteFiles(); viewModel.calculateStorageStats(context) }, modifier = Modifier.padding(end = 8.dp)) { Text("📋 Pegar") }
+                                    Button(onClick = {
+                                        viewModel.pasteFiles()
+                                        viewModel.calculateStorageStats(context)
+                                    }, modifier = Modifier.padding(end = 8.dp)) { Text("📋 Pegar") }
                                     OutlinedButton(onClick = { viewModel.clearClipboard() }) { Text("❌") }
                                 }
                             }
                         }
 
-                        when {
-                            currentCategory == FileCategory.STORAGE_ANALYSIS -> StorageAnalysisScreen(viewModel)
-                            currentCategory == FileCategory.FTP_SERVER -> FtpServerScreen(viewModel)
-                            currentCategory == FileCategory.DUPLICATES -> DuplicatesScreen(viewModel)
-                            currentCategory == FileCategory.LARGE_FILES -> LargeFilesScreen(viewModel)
-                            (currentCategory == FileCategory.IMAGES || currentCategory == FileCategory.VIDEOS) && selectedMediaFolder == null -> {
-                                MediaFolderGridScreen(viewModel = viewModel, category = currentCategory)
-                            }
-                            currentCategory == FileCategory.APPS -> {
+                        when (currentCategory) {
+                            FileCategory.STORAGE_ANALYSIS -> StorageAnalysisScreen(viewModel)
+                            FileCategory.FTP_SERVER -> FtpServerScreen(viewModel)
+                            FileCategory.DUPLICATES -> DuplicatesScreen(viewModel)
+                            FileCategory.LARGE_FILES -> LargeFilesScreen(viewModel)
+                            FileCategory.APPS -> {
                                 LazyColumn {
                                     items(apps) { app ->
-                                        Row(modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                                            Text("📱", modifier = Modifier.padding(end = 12.dp), fontSize = 44.sp)
-                                            Column(modifier = Modifier.weight(1f)) {
-                                                Text(text = app.name, style = MaterialTheme.typography.bodyMedium, color = Color(0xFF1A1C1E))
-                                                Text(text = app.packageName, style = MaterialTheme.typography.labelSmall, color = Color(0xFF72777D))
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clickable { viewModel.extractApp(app, context) }
+                                                .padding(vertical = 12.dp, horizontal = 4.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            if (app.icon != null) {
+                                                val bitmap = (app.icon as? BitmapDrawable)?.bitmap
+                                                if (bitmap != null) {
+                                                    Image(
+                                                        bitmap = bitmap.asImageBitmap(),
+                                                        contentDescription = app.name,
+                                                        modifier = Modifier
+                                                            .size(42.dp)
+                                                            .padding(end = 12.dp)
+                                                    )
+                                                } else {
+                                                    Text("📱", modifier = Modifier.padding(end = 12.dp), fontSize = 32.sp)
+                                                }
+                                            } else {
+                                                Text("📱", modifier = Modifier.padding(end = 12.dp), fontSize = 32.sp)
                                             }
-                                            Text(viewModel.formatSize(app.sizeBytes), style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(end = 8.dp))
-                                            TextButton(onClick = { viewModel.extractApp(app, context) }) { Text("Extraer APK") }
+
+                                            Text(
+                                                text = app.name,
+                                                style = MaterialTheme.typography.bodyLarge,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFF1A1C1E),
+                                                modifier = Modifier.weight(1f)
+                                            )
+
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text(
+                                                    text = viewModel.formatSize(app.sizeBytes),
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    color = Color(0xFF72777D),
+                                                    modifier = Modifier.padding(end = 6.dp)
+                                                )
+                                                Text(
+                                                    text = ">",
+                                                    fontSize = 16.sp,
+                                                    color = Color(0xFFB0B5BA)
+                                                )
+                                            }
                                         }
-                                        HorizontalDivider(color = Color(0xFFE1E2E5))
+                                        HorizontalDivider(color = Color(0xFFF0F2F5))
                                     }
                                 }
                             }
@@ -2337,8 +2474,11 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
                                     LazyColumn {
                                         items(files) { file ->
                                             FileListItem(
-                                                file = file, isSelectionMode = isSelectionMode, isSelected = selectedFiles.contains(file),
-                                                viewModel = viewModel, context = context,
+                                                file = file,
+                                                isSelectionMode = isSelectionMode,
+                                                isSelected = selectedFiles.contains(file),
+                                                viewModel = viewModel,
+                                                context = context,
                                                 onRename = { fileToRename = it; newFileName = it.name },
                                                 onShowDetails = { fileForDetails = it }
                                             )
@@ -2348,8 +2488,11 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
                                     LazyVerticalGrid(columns = GridCells.Fixed(3), modifier = Modifier.fillMaxSize()) {
                                         items(files) { file ->
                                             FileGridItem(
-                                                file = file, isSelectionMode = isSelectionMode, isSelected = selectedFiles.contains(file),
-                                                viewModel = viewModel, context = context,
+                                                file = file,
+                                                isSelectionMode = isSelectionMode,
+                                                isSelected = selectedFiles.contains(file),
+                                                viewModel = viewModel,
+                                                context = context,
                                                 onShowDetails = { fileForDetails = it }
                                             )
                                         }
@@ -2364,15 +2507,16 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
     }
 }
 
-// ==========================================
-// ELEMENTOS DE LISTA Y CUADRÍCULA
-// ==========================================
-
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun FileListItem(
-    file: File, isSelectionMode: Boolean, isSelected: Boolean, viewModel: FileManagerViewModel,
-    context: Context, onRename: (File) -> Unit, onShowDetails: (File) -> Unit
+    file: File,
+    isSelectionMode: Boolean,
+    isSelected: Boolean,
+    viewModel: FileManagerViewModel,
+    context: Context,
+    onRename: (File) -> Unit,
+    onShowDetails: (File) -> Unit
 ) {
     Row(
         modifier = Modifier
@@ -2384,29 +2528,26 @@ fun FileListItem(
                     else if (file.isDirectory) viewModel.openDirectory(file)
                     else viewModel.openFile(context, file)
                 },
-                onLongClick = { viewModel.selectSingleFile(file) }
+                onLongClick = {
+                    viewModel.selectSingleFile(file)
+                }
             )
             .padding(vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        if (isSelectionMode) Checkbox(checked = isSelected, onCheckedChange = { viewModel.toggleFileSelection(file) }, modifier = Modifier.padding(end = 8.dp))
+        if (isSelectionMode) {
+            Checkbox(checked = isSelected, onCheckedChange = { viewModel.toggleFileSelection(file) }, modifier = Modifier.padding(end = 8.dp))
+        }
 
         val ext = file.extension.lowercase()
-        val isImage = ext in listOf("jpg", "jpeg", "gif", "bmp")
+        val isImage = ext in listOf("jpg", "jpeg", "png", "webp", "gif", "bmp")
         val isVideo = ext in listOf("mp4", "mkv", "avi", "mov", "webm")
         val isPdf = ext == "pdf"
         val isApk = ext == "apk"
 
         if (isImage || isVideo) {
-            val imageLoader = ImageLoader.Builder(context)
-                .components {
-                    add(VideoFrameDecoder.Factory())
-                }
-                .build()
-
             AsyncImage(
                 model = file,
-                imageLoader = imageLoader,
                 contentDescription = "Miniatura",
                 modifier = Modifier.size(64.dp).padding(end = 12.dp).clip(RoundedCornerShape(8.dp)),
                 contentScale = ContentScale.Crop
@@ -2422,7 +2563,11 @@ fun FileListItem(
                 ext in listOf("mp3", "wav", "ogg", "flac", "m4a") -> "🎵"
                 else -> "📄"
             }
-            Text(text = iconEmoji, modifier = Modifier.padding(end = 12.dp), fontSize = 44.sp)
+            Text(
+                text = iconEmoji,
+                modifier = Modifier.padding(end = 12.dp),
+                fontSize = 44.sp
+            )
         }
 
         Column(modifier = Modifier.weight(1f)) {
@@ -2437,4 +2582,89 @@ fun FileListItem(
     HorizontalDivider(color = Color(0xFFE1E2E5))
 }
 
-@OptIn(ExperimentalFoundationApi::
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun FileGridItem(
+    file: File,
+    isSelectionMode: Boolean,
+    isSelected: Boolean,
+    viewModel: FileManagerViewModel,
+    context: Context,
+    onShowDetails: (File) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .padding(6.dp)
+            .background(if (isSelected) Color(0xFFE2EDF8) else Color(0xFFF7F9FC), RoundedCornerShape(12.dp))
+            .combinedClickable(
+                onClick = {
+                    if (isSelectionMode) viewModel.toggleFileSelection(file)
+                    else if (file.isDirectory) viewModel.openDirectory(file)
+                    else viewModel.openFile(context, file)
+                },
+                onLongClick = {
+                    viewModel.selectSingleFile(file)
+                }
+            )
+            .padding(10.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            if (isSelectionMode) {
+                Checkbox(checked = isSelected, onCheckedChange = { viewModel.toggleFileSelection(file) })
+            } else {
+                Spacer(modifier = Modifier.weight(1f))
+                Text(
+                    text = "ℹ️",
+                    modifier = Modifier.clickable { onShowDetails(file) }.padding(2.dp),
+                    fontSize = 18.sp
+                )
+            }
+        }
+        val ext = file.extension.lowercase()
+        val isImage = ext in listOf("jpg", "jpeg", "png", "webp", "gif", "bmp")
+        val isVideo = ext in listOf("mp4", "mkv", "avi", "mov", "webm")
+        val isPdf = ext == "pdf"
+        val isApk = ext == "apk"
+
+        if (isImage || isVideo) {
+            AsyncImage(
+                model = file,
+                contentDescription = "Miniatura",
+                modifier = Modifier.size(80.dp).padding(bottom = 6.dp).clip(RoundedCornerShape(8.dp)),
+                contentScale = ContentScale.Crop
+            )
+        } else if (isPdf) {
+            PdfThumbnail(file = file, modifier = Modifier.size(80.dp).padding(bottom = 6.dp))
+        } else if (isApk) {
+            ApkIconThumbnail(file = file, context = context, modifier = Modifier.size(80.dp).padding(bottom = 6.dp))
+        } else {
+            val iconEmoji = when {
+                file.isDirectory -> "📁"
+                ext == "zip" -> "📦"
+                ext in listOf("mp3", "wav", "ogg", "flac", "m4a") -> "🎵"
+                else -> "📄"
+            }
+            Text(text = iconEmoji, fontSize = 56.sp, modifier = Modifier.padding(bottom = 6.dp))
+        }
+        Text(text = file.name, style = MaterialTheme.typography.labelMedium, maxLines = 2, overflow = TextOverflow.Ellipsis, color = Color(0xFF1A1C1E))
+    }
+}
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        
+        val builder = StrictMode.VmPolicy.Builder()
+        StrictMode.setVmPolicy(builder.build())
+
+        setContent {
+            MaterialTheme {
+                Surface {
+                    val viewModel: FileManagerViewModel = viewModel()
+                    FileListScreen(viewModel = viewModel)
+                }
+            }
+        }
+    }
+}
