@@ -87,6 +87,10 @@ import java.util.Locale
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
+import android.Manifest
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 
 data class StorageStats(
     val totalBytes: Long = 0,
@@ -2098,26 +2102,82 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val coroutineScope = rememberCoroutineScope()
 
-    var showPermissionDialog by remember { mutableStateOf(false) }
+   var showPermissionDialog by remember { mutableStateOf(false) }
 
-    fun checkStoragePermission(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            Environment.isExternalStorageManager()
-        } else {
-            true
-        }
+// Lanzador para solicitar permisos nativos en Android 10 o inferior
+val permissionLauncher = rememberLauncherForActivityResult(
+    contract = ActivityResultContracts.RequestMultiplePermissions()
+) { permissions ->
+    val granted = permissions.entries.all { it.value }
+    if (granted) {
+        showPermissionDialog = false
+        viewModel.calculateStorageStats(context)
+        viewModel.loadFiles()
+    } else {
+        // Si el usuario rechaza el cuadro de diálogo del sistema, la app se cierra
+        (context as? ComponentActivity)?.finish()
     }
+}
 
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                showPermissionDialog = !checkStoragePermission()
-                if (!showPermissionDialog) {
-                    viewModel.calculateStorageStats(context)
-                    viewModel.loadFiles()
-                }
+// Comprobación de permisos adaptada para todas las versiones de Android
+fun checkStoragePermission(): Boolean {
+    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        Environment.isExternalStorageManager()
+    } else {
+        val write = ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        val read = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        write && read
+    }
+}
+
+DisposableEffect(lifecycleOwner) {
+    val observer = LifecycleEventObserver { _, event ->
+        if (event == Lifecycle.Event.ON_RESUME) {
+            showPermissionDialog = !checkStoragePermission()
+            if (!showPermissionDialog) {
+                viewModel.calculateStorageStats(context)
+                viewModel.loadFiles()
             }
         }
+    }
+    lifecycleOwner.lifecycle.addObserver(observer)
+    onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+}
+
+// ... (Mantén aquí tus variables como showDeleteConfirm, showMenu, BackHandler, etc.)
+
+// Mostrar pantalla inicial de permisos si hacen falta
+if (showPermissionDialog) {
+    FullScreenPermissionScreen(
+        onRequestPermission = {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                try {
+                    // Android 11+: Abre los ajustes de acceso total
+                    val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                        data = Uri.parse("package:${context.packageName}")
+                    }
+                    context.startActivity(intent)
+                } catch (e: Exception) {
+                    val intent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                    context.startActivity(intent)
+                }
+            } else {
+                // Android 10 o inferior: Muestra el popup nativo de permisos
+                permissionLauncher.launch(
+                    arrayOf(
+                        Manifest.permission.READ_EXTERNAL_STORAGE,
+                        Manifest.permission.WRITE_EXTERNAL_STORAGE
+                    )
+                )
+            }
+        },
+        onDismiss = {
+            // Si el usuario le da a cancelar/salir, cerramos la app
+            showPermissionDialog = false
+            (context as? ComponentActivity)?.finish()
+        }
+    )
+}
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
