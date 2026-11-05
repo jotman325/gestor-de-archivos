@@ -2214,6 +2214,16 @@ class MainActivity : ComponentActivity() {
         val builder = StrictMode.VmPolicy.Builder()
         StrictMode.setVmPolicy(builder.build())
 
+        // Solicitar el permiso "Acceso a todos los archivos" en Android 11 (API 30) o superior
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (!Environment.isExternalStorageManager()) {
+                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                    data = Uri.parse("package:$packageName")
+                }
+                startActivity(intent)
+            }
+        }
+
         setContent {
             MaterialTheme {
                 Surface {
