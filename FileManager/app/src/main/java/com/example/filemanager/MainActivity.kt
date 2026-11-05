@@ -1,5 +1,6 @@
 package com.example.filemanager
 
+import android.Manifest
 import android.app.usage.StorageStatsManager
 import android.content.Context
 import android.content.Intent
@@ -23,7 +24,9 @@ import android.webkit.MimeTypeMap
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -55,6 +58,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -87,10 +91,6 @@ import java.util.Locale
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
-import android.Manifest
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.core.content.ContextCompat
 
 data class StorageStats(
     val totalBytes: Long = 0,
@@ -1093,7 +1093,7 @@ fun FullScreenPermissionScreen(
                     .height(50.dp),
                 shape = RoundedCornerShape(12.dp)
             ) {
-                Text("Ahora no", fontSize = 16.sp)
+                Text("Salir de la aplicación", fontSize = 16.sp)
             }
         }
     }
@@ -2102,82 +2102,41 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val coroutineScope = rememberCoroutineScope()
 
-   var showPermissionDialog by remember { mutableStateOf(false) }
+    var showPermissionDialog by remember { mutableStateOf(false) }
 
-// Lanzador para solicitar permisos nativos en Android 10 o inferior
-val permissionLauncher = rememberLauncherForActivityResult(
-    contract = ActivityResultContracts.RequestMultiplePermissions()
-) { permissions ->
-    val granted = permissions.entries.all { it.value }
-    if (granted) {
-        showPermissionDialog = false
-        viewModel.calculateStorageStats(context)
-        viewModel.loadFiles()
-    } else {
-        // Si el usuario rechaza el cuadro de diálogo del sistema, la app se cierra
-        (context as? ComponentActivity)?.finish()
-    }
-}
-
-// Comprobación de permisos adaptada para todas las versiones de Android
-fun checkStoragePermission(): Boolean {
-    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-        Environment.isExternalStorageManager()
-    } else {
-        val write = ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
-        val read = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
-        write && read
-    }
-}
-
-DisposableEffect(lifecycleOwner) {
-    val observer = LifecycleEventObserver { _, event ->
-        if (event == Lifecycle.Event.ON_RESUME) {
-            showPermissionDialog = !checkStoragePermission()
-            if (!showPermissionDialog) {
-                viewModel.calculateStorageStats(context)
-                viewModel.loadFiles()
-            }
-        }
-    }
-    lifecycleOwner.lifecycle.addObserver(observer)
-    onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-}
-
-// ... (Mantén aquí tus variables como showDeleteConfirm, showMenu, BackHandler, etc.)
-
-// Mostrar pantalla inicial de permisos si hacen falta
-if (showPermissionDialog) {
-    FullScreenPermissionScreen(
-        onRequestPermission = {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                try {
-                    // Android 11+: Abre los ajustes de acceso total
-                    val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
-                        data = Uri.parse("package:${context.packageName}")
-                    }
-                    context.startActivity(intent)
-                } catch (e: Exception) {
-                    val intent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
-                    context.startActivity(intent)
-                }
-            } else {
-                // Android 10 o inferior: Muestra el popup nativo de permisos
-                permissionLauncher.launch(
-                    arrayOf(
-                        Manifest.permission.READ_EXTERNAL_STORAGE,
-                        Manifest.permission.WRITE_EXTERNAL_STORAGE
-                    )
-                )
-            }
-        },
-        onDismiss = {
-            // Si el usuario le da a cancelar/salir, cerramos la app
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val granted = permissions.entries.all { it.value }
+        if (granted) {
             showPermissionDialog = false
+            viewModel.calculateStorageStats(context)
+            viewModel.loadFiles()
+        } else {
             (context as? ComponentActivity)?.finish()
         }
-    )
-}
+    }
+
+    fun checkStoragePermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Environment.isExternalStorageManager()
+        } else {
+            val write = ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+            val read = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+            write && read
+        }
+    }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                showPermissionDialog = !checkStoragePermission()
+                if (!showPermissionDialog) {
+                    viewModel.calculateStorageStats(context)
+                    viewModel.loadFiles()
+                }
+            }
+        }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
@@ -2211,10 +2170,22 @@ if (showPermissionDialog) {
         FullScreenPermissionScreen(
             onRequestPermission = {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
-                        data = Uri.parse("package:${context.packageName}")
+                    try {
+                        val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                            data = Uri.parse("package:${context.packageName}")
+                        }
+                        context.startActivity(intent)
+                    } catch (e: Exception) {
+                        val intent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                        context.startActivity(intent)
                     }
-                    context.startActivity(intent)
+                } else {
+                    permissionLauncher.launch(
+                        arrayOf(
+                            Manifest.permission.READ_EXTERNAL_STORAGE,
+                            Manifest.permission.WRITE_EXTERNAL_STORAGE
+                        )
+                    )
                 }
             },
             onDismiss = {
@@ -2331,400 +2302,3 @@ if (showPermissionDialog) {
                         title = {
                             Text(
                                 when (currentCategory) {
-                                    FileCategory.STORAGE_ANALYSIS -> "Análisis de almacenamiento"
-                                    FileCategory.LARGE_FILES -> "Archivos grandes"
-                                    FileCategory.DUPLICATES -> "Archivos duplicados"
-                                    FileCategory.APPS -> "Apps"
-                                    FileCategory.FTP_SERVER -> "PC (Servidor FTP)"
-                                    else -> "Gestor de Archivos"
-                                },
-                                fontWeight = FontWeight.SemiBold,
-                                color = Color(0xFF1A1C1E)
-                            )
-                        },
-                        navigationIcon = {
-                            IconButton(onClick = { coroutineScope.launch { drawerState.open() } }) {
-                                Text("☰", fontSize = 24.sp, color = Color(0xFF1A1C1E))
-                            }
-                        },
-                        actions = {
-                            IconButton(onClick = { viewModel.openSearch() }) {
-                                Text("🔍", fontSize = 20.sp)
-                            }
-                            Box {
-                                IconButton(onClick = { showMenu = true }) {
-                                    Text("⋮", fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                                }
-                                DropdownMenu(
-                                    expanded = showMenu,
-                                    onDismissRequest = { showMenu = false }
-                                ) {
-                                    DropdownMenuItem(
-                                        text = {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Text("Cuadrícula", modifier = Modifier.weight(1f))
-                                                if (viewMode == ViewMode.GRID) Text("✓", color = MaterialTheme.colorScheme.primary)
-                                            }
-                                        },
-                                        onClick = { viewModel.setViewMode(ViewMode.GRID); showMenu = false }
-                                    )
-                                    DropdownMenuItem(
-                                        text = {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Text("Lista", modifier = Modifier.weight(1f))
-                                                if (viewMode == ViewMode.LIST) Text("✓", color = MaterialTheme.colorScheme.primary)
-                                            }
-                                        },
-                                        onClick = { viewModel.setViewMode(ViewMode.LIST); showMenu = false }
-                                    )
-                                    HorizontalDivider()
-                                    DropdownMenuItem(
-                                        text = { Text("Ordenar por Fecha") },
-                                        onClick = { viewModel.setSortOption(SortOption.DATE_DESC); showMenu = false }
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Ordenar por Nombre") },
-                                        onClick = { viewModel.setSortOption(SortOption.NAME_ASC); showMenu = false }
-                                    )
-                                    HorizontalDivider()
-                                    DropdownMenuItem(
-                                        text = { Text(if (showHidden) "Ocultar archivos ocultos" else "Mostrar archivos ocultos") },
-                                        onClick = { viewModel.toggleHiddenFiles(); showMenu = false }
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Crear carpeta") },
-                                        onClick = { showMenu = false; showCreateFolderDialog = true }
-                                    )
-                                }
-                            }
-                        },
-                        colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
-                    )
-                }
-            },
-            bottomBar = {
-                Column {
-                    AudioPlayerBar(viewModel = viewModel)
-
-                    if (isSelectionMode) {
-                        val singleSelected = selectedFiles.firstOrNull()
-                        val isZip = selectedFiles.size == 1 && singleSelected?.extension?.lowercase() == "zip"
-
-                        ActionBottomSheet(
-                            selectedCount = selectedFiles.size,
-                            isTrash = currentCategory == FileCategory.TRASH,
-                            isZipFile = isZip,
-                            onCopy = { viewModel.copySelectedFiles() },
-                            onCut = { viewModel.cutSelectedFiles() },
-                            onDelete = { showDeleteConfirm = true },
-                            onZip = { showZipDialog = true },
-                            onExtractHere = { singleSelected?.let { viewModel.unzipFileHere(it, context) } },
-                            onExtractTo = { showFolderPickerForZip = singleSelected },
-                            onRename = {
-                                singleSelected?.let {
-                                    fileToRename = it
-                                    newFileName = it.name
-                                }
-                            },
-                            onShare = {
-                                singleSelected?.let { viewModel.shareFile(context, it) }
-                            },
-                            onRestore = { viewModel.restoreSelectedFiles() },
-                            onDismiss = { viewModel.clearSelection() }
-                        )
-                    }
-                }
-            },
-            containerColor = Color.White
-        ) { paddingValues ->
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(paddingValues)
-            ) {
-                if (isSearchActive) {
-                    FullScreenSearchView(
-                        viewModel = viewModel,
-                        context = context,
-                        onRename = { fileToRename = it; newFileName = it.name },
-                        onShowDetails = { fileForDetails = it }
-                    )
-                } else {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(horizontal = 16.dp)
-                    ) {
-                        if (currentCategory == FileCategory.ALL || currentCategory == FileCategory.TRASH) {
-                            PathBreadcrumbs(currentDir = currentDir, onPathClick = { viewModel.navigateToDirectory(it) })
-                        }
-
-                        if (currentCategory != FileCategory.DUPLICATES && currentCategory != FileCategory.STORAGE_ANALYSIS && currentCategory != FileCategory.FTP_SERVER && currentCategory != FileCategory.LARGE_FILES) {
-                            if (hasClipboardData && (currentCategory == FileCategory.ALL || currentCategory == FileCategory.TRASH)) {
-                                Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.End) {
-                                    Button(onClick = {
-                                        viewModel.pasteFiles()
-                                        viewModel.calculateStorageStats(context)
-                                    }, modifier = Modifier.padding(end = 8.dp)) { Text("📋 Pegar") }
-                                    OutlinedButton(onClick = { viewModel.clearClipboard() }) { Text("❌") }
-                                }
-                            }
-                        }
-
-                        when (currentCategory) {
-                            FileCategory.STORAGE_ANALYSIS -> StorageAnalysisScreen(viewModel)
-                            FileCategory.FTP_SERVER -> FtpServerScreen(viewModel)
-                            FileCategory.DUPLICATES -> DuplicatesScreen(viewModel)
-                            FileCategory.LARGE_FILES -> LargeFilesScreen(viewModel)
-                            FileCategory.APPS -> {
-                                LazyColumn {
-                                    items(apps) { app ->
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .clickable { viewModel.extractApp(app, context) }
-                                                .padding(vertical = 12.dp, horizontal = 4.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            if (app.icon != null) {
-                                                val bitmap = (app.icon as? BitmapDrawable)?.bitmap
-                                                if (bitmap != null) {
-                                                    Image(
-                                                        bitmap = bitmap.asImageBitmap(),
-                                                        contentDescription = app.name,
-                                                        modifier = Modifier
-                                                            .size(42.dp)
-                                                            .padding(end = 12.dp)
-                                                    )
-                                                } else {
-                                                    Text("📱", modifier = Modifier.padding(end = 12.dp), fontSize = 32.sp)
-                                                }
-                                            } else {
-                                                Text("📱", modifier = Modifier.padding(end = 12.dp), fontSize = 32.sp)
-                                            }
-
-                                            Text(
-                                                text = app.name,
-                                                style = MaterialTheme.typography.bodyLarge,
-                                                fontWeight = FontWeight.Bold,
-                                                color = Color(0xFF1A1C1E),
-                                                modifier = Modifier.weight(1f)
-                                            )
-
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Text(
-                                                    text = viewModel.formatSize(app.sizeBytes),
-                                                    style = MaterialTheme.typography.bodyMedium,
-                                                    color = Color(0xFF72777D),
-                                                    modifier = Modifier.padding(end = 6.dp)
-                                                )
-                                                Text(
-                                                    text = ">",
-                                                    fontSize = 16.sp,
-                                                    color = Color(0xFFB0B5BA)
-                                                )
-                                            }
-                                        }
-                                        HorizontalDivider(color = Color(0xFFF0F2F5))
-                                    }
-                                }
-                            }
-                            else -> {
-                                if (viewMode == ViewMode.LIST) {
-                                    LazyColumn {
-                                        items(files) { file ->
-                                            FileListItem(
-                                                file = file,
-                                                isSelectionMode = isSelectionMode,
-                                                isSelected = selectedFiles.contains(file),
-                                                viewModel = viewModel,
-                                                context = context,
-                                                onRename = { fileToRename = it; newFileName = it.name },
-                                                onShowDetails = { fileForDetails = it }
-                                            )
-                                        }
-                                    }
-                                } else {
-                                    LazyVerticalGrid(columns = GridCells.Fixed(3), modifier = Modifier.fillMaxSize()) {
-                                        items(files) { file ->
-                                            FileGridItem(
-                                                file = file,
-                                                isSelectionMode = isSelectionMode,
-                                                isSelected = selectedFiles.contains(file),
-                                                viewModel = viewModel,
-                                                context = context,
-                                                onShowDetails = { fileForDetails = it }
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-fun FileListItem(
-    file: File,
-    isSelectionMode: Boolean,
-    isSelected: Boolean,
-    viewModel: FileManagerViewModel,
-    context: Context,
-    onRename: (File) -> Unit,
-    onShowDetails: (File) -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(if (isSelected) Color(0xFFE2EDF8) else Color.Transparent)
-            .combinedClickable(
-                onClick = {
-                    if (isSelectionMode) viewModel.toggleFileSelection(file)
-                    else if (file.isDirectory) viewModel.openDirectory(file)
-                    else viewModel.openFile(context, file)
-                },
-                onLongClick = {
-                    viewModel.selectSingleFile(file)
-                }
-            )
-            .padding(vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        if (isSelectionMode) {
-            Checkbox(checked = isSelected, onCheckedChange = { viewModel.toggleFileSelection(file) }, modifier = Modifier.padding(end = 8.dp))
-        }
-
-        val ext = file.extension.lowercase()
-        val isImage = ext in listOf("jpg", "jpeg", "png", "webp", "gif", "bmp")
-        val isVideo = ext in listOf("mp4", "mkv", "avi", "mov", "webm")
-        val isPdf = ext == "pdf"
-        val isApk = ext == "apk"
-
-        if (isImage || isVideo) {
-            AsyncImage(
-                model = file,
-                contentDescription = "Miniatura",
-                modifier = Modifier.size(64.dp).padding(end = 12.dp).clip(RoundedCornerShape(8.dp)),
-                contentScale = ContentScale.Crop
-            )
-        } else if (isPdf) {
-            PdfThumbnail(file = file, modifier = Modifier.size(64.dp).padding(end = 12.dp))
-        } else if (isApk) {
-            ApkIconThumbnail(file = file, context = context, modifier = Modifier.size(64.dp).padding(end = 12.dp))
-        } else {
-            val iconEmoji = when {
-                file.isDirectory -> "📁"
-                ext == "zip" -> "📦"
-                ext in listOf("mp3", "wav", "ogg", "flac", "m4a") -> "🎵"
-                else -> "📄"
-            }
-            Text(
-                text = iconEmoji,
-                modifier = Modifier.padding(end = 12.dp),
-                fontSize = 44.sp
-            )
-        }
-
-        Column(modifier = Modifier.weight(1f)) {
-            Text(text = file.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium, color = Color(0xFF1A1C1E))
-            Text(text = if (file.isDirectory) "Carpeta" else viewModel.formatSize(file.length()), style = MaterialTheme.typography.labelSmall, color = Color(0xFF72777D))
-        }
-
-        if (!isSelectionMode) {
-            IconButton(onClick = { onShowDetails(file) }) { Text("ℹ️", fontSize = 20.sp) }
-        }
-    }
-    HorizontalDivider(color = Color(0xFFE1E2E5))
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-fun FileGridItem(
-    file: File,
-    isSelectionMode: Boolean,
-    isSelected: Boolean,
-    viewModel: FileManagerViewModel,
-    context: Context,
-    onShowDetails: (File) -> Unit
-) {
-    Column(
-        modifier = Modifier
-            .padding(6.dp)
-            .background(if (isSelected) Color(0xFFE2EDF8) else Color(0xFFF7F9FC), RoundedCornerShape(12.dp))
-            .combinedClickable(
-                onClick = {
-                    if (isSelectionMode) viewModel.toggleFileSelection(file)
-                    else if (file.isDirectory) viewModel.openDirectory(file)
-                    else viewModel.openFile(context, file)
-                },
-                onLongClick = {
-                    viewModel.selectSingleFile(file)
-                }
-            )
-            .padding(10.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            if (isSelectionMode) {
-                Checkbox(checked = isSelected, onCheckedChange = { viewModel.toggleFileSelection(file) })
-            } else {
-                Spacer(modifier = Modifier.weight(1f))
-                Text(
-                    text = "ℹ️",
-                    modifier = Modifier.clickable { onShowDetails(file) }.padding(2.dp),
-                    fontSize = 18.sp
-                )
-            }
-        }
-        val ext = file.extension.lowercase()
-        val isImage = ext in listOf("jpg", "jpeg", "png", "webp", "gif", "bmp")
-        val isVideo = ext in listOf("mp4", "mkv", "avi", "mov", "webm")
-        val isPdf = ext == "pdf"
-        val isApk = ext == "apk"
-
-        if (isImage || isVideo) {
-            AsyncImage(
-                model = file,
-                contentDescription = "Miniatura",
-                modifier = Modifier.size(80.dp).padding(bottom = 6.dp).clip(RoundedCornerShape(8.dp)),
-                contentScale = ContentScale.Crop
-            )
-        } else if (isPdf) {
-            PdfThumbnail(file = file, modifier = Modifier.size(80.dp).padding(bottom = 6.dp))
-        } else if (isApk) {
-            ApkIconThumbnail(file = file, context = context, modifier = Modifier.size(80.dp).padding(bottom = 6.dp))
-        } else {
-            val iconEmoji = when {
-                file.isDirectory -> "📁"
-                ext == "zip" -> "📦"
-                ext in listOf("mp3", "wav", "ogg", "flac", "m4a") -> "🎵"
-                else -> "📄"
-            }
-            Text(text = iconEmoji, fontSize = 56.sp, modifier = Modifier.padding(bottom = 6.dp))
-        }
-        Text(text = file.name, style = MaterialTheme.typography.labelMedium, maxLines = 2, overflow = TextOverflow.Ellipsis, color = Color(0xFF1A1C1E))
-    }
-}
-
-class MainActivity : ComponentActivity() {
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        
-        val builder = StrictMode.VmPolicy.Builder()
-        StrictMode.setVmPolicy(builder.build())
-
-        setContent {
-            MaterialTheme {
-                Surface {
-                    val viewModel: FileManagerViewModel = viewModel()
-                    FileListScreen(viewModel = viewModel)
-                }
-            }
-        }
-    }
-}
