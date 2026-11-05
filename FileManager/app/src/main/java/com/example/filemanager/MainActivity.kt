@@ -2019,7 +2019,7 @@ fun LargeFilesScreen(viewModel: FileManagerViewModel) {
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("Archivos grandes", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text("Archivos Grandes", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             
             Box {
                 OutlinedButton(onClick = { expanded = true }) {
@@ -2109,7 +2109,7 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
+            if (event == Lifecycle.EVENT.ON_RESUME) {
                 showPermissionDialog = !checkStoragePermission()
                 if (!showPermissionDialog) {
                     viewModel.calculateStorageStats(context)
