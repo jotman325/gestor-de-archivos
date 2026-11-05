@@ -25,9 +25,6 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.viewModelScope
-import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -59,9 +56,14 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
+import coil.ImageLoader
 import coil.compose.AsyncImage
+import coil.decode.VideoFrameDecoder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -395,7 +397,6 @@ class FileManagerViewModel : ViewModel() {
                     } else if (file.isFile) {
                         val ext = file.extension.lowercase()
                         val match = when (category) {
-                            // Sin archivos .png ni .webp en imágenes
                             FileCategory.IMAGES -> ext in listOf("jpg", "jpeg", "gif", "bmp")
                             FileCategory.VIDEOS -> ext in listOf("mp4", "mkv", "avi", "mov", "webm")
                             else -> false
@@ -620,7 +621,6 @@ class FileManagerViewModel : ViewModel() {
         }
     }
 
-    // Duplicados agrupados por coincidencia exacta del nombre del archivo (insensible a mayúsculas/minúsculas)
     fun scanForDuplicates(context: Context) {
         if (_isScanningDuplicates.value) return
         _isScanningDuplicates.value = true
@@ -748,7 +748,7 @@ class FileManagerViewModel : ViewModel() {
         when (category) {
             FileCategory.ALL -> loadFiles()
             FileCategory.IMAGES, FileCategory.VIDEOS -> scanMediaByFolders(category)
-            FileCategory.AUDIO -> scanAllFilesByCategory(FileCategory.AUDIO) // Audio en lista directa sin subcategorías
+            FileCategory.AUDIO -> scanAllFilesByCategory(FileCategory.AUDIO)
             FileCategory.DOWNLOADS -> {
                 _currentDirectory.value = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
                 _currentCategory.value = FileCategory.ALL
@@ -952,7 +952,6 @@ class FileManagerViewModel : ViewModel() {
         _hasClipboardData.value = false
     }
 
-    // Refresca manteniendo el estado de navegación actual intacto
     fun refreshCurrentCategoryView() {
         if (_selectedMediaFolder.value != null) {
             selectMediaFolder(_selectedMediaFolder.value!!, _currentCategory.value)
@@ -1077,10 +1076,34 @@ class FileManagerViewModel : ViewModel() {
                 return
             }
 
-            val extension = file.extension.lowercase()
+            val extension = file.extension.lowercase(Locale.getDefault())
 
+            // Visor Externo para Imágenes (Lanza la Galería del sistema)
+            if (extension in listOf("jpg", "jpeg", "gif", "bmp")) {
+                val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
+                val intent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, "image/*")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(Intent.createChooser(intent, "Abrir imagen con:"))
+                return
+            }
+
+            // Reproductor de Audio o Vídeo
             if (extension in listOf("mp3", "wav", "ogg", "flac", "m4a")) {
                 playAudio(file, context)
+                return
+            }
+
+            if (extension in listOf("mp4", "mkv", "avi", "mov", "webm")) {
+                val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
+                val intent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, "video/*")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(Intent.createChooser(intent, "Reproducir vídeo con:"))
                 return
             }
 
@@ -1116,13 +1139,19 @@ class FileManagerViewModel : ViewModel() {
 // FUNCIONES AUXILIARES DE SISTEMA
 // ==========================================
 
+// Solución al Error 3192 (Acceso denegado al pasar URI directa)
 fun setAsWallpaperSafe(context: Context, imageFile: File) {
     try {
         val wallpaperManager = WallpaperManager.getInstance(context)
         val bitmap = BitmapFactory.decodeFile(imageFile.absolutePath)
+        
         if (bitmap != null) {
-            wallpaperManager.setBitmap(bitmap)
-            Toast.makeText(context, "Fondo de pantalla cambiado con éxito", Toast.LENGTH_SHORT).show()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                wallpaperManager.setBitmap(bitmap, null, true, WallpaperManager.FLAG_SYSTEM)
+            } else {
+                wallpaperManager.setBitmap(bitmap)
+            }
+            Toast.makeText(context, "Fondo de pantalla actualizado con éxito", Toast.LENGTH_SHORT).show()
         } else {
             Toast.makeText(context, "No se pudo procesar la imagen", Toast.LENGTH_SHORT).show()
         }
@@ -1910,7 +1939,6 @@ fun FileDetailsDialog(file: File, onDismiss: () -> Unit) {
     )
 }
 
-// Duplicados agrupados por concordancia de caracteres de nombre
 @Composable
 fun DuplicatesScreen(viewModel: FileManagerViewModel) {
     val duplicates by viewModel.duplicateFiles.collectAsState()
@@ -2370,8 +2398,16 @@ fun FileListItem(
         val isApk = ext == "apk"
 
         if (isImage || isVideo) {
+            val imageLoader = ImageLoader.Builder(context)
+                .components {
+                    add(VideoFrameDecoder.Factory())
+                }
+                .build()
+
             AsyncImage(
-                model = file, contentDescription = "Miniatura",
+                model = file,
+                imageLoader = imageLoader,
+                contentDescription = "Miniatura",
                 modifier = Modifier.size(64.dp).padding(end = 12.dp).clip(RoundedCornerShape(8.dp)),
                 contentScale = ContentScale.Crop
             )
@@ -2401,91 +2437,4 @@ fun FileListItem(
     HorizontalDivider(color = Color(0xFFE1E2E5))
 }
 
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-fun FileGridItem(
-    file: File, isSelectionMode: Boolean, isSelected: Boolean, viewModel: FileManagerViewModel,
-    context: Context, onShowDetails: (File) -> Unit
-) {
-    Column(
-        modifier = Modifier
-            .padding(6.dp)
-            .background(if (isSelected) Color(0xFFE2EDF8) else Color(0xFFF7F9FC), RoundedCornerShape(12.dp))
-            .combinedClickable(
-                onClick = {
-                    if (isSelectionMode) viewModel.toggleFileSelection(file)
-                    else if (file.isDirectory) viewModel.openDirectory(file)
-                    else viewModel.openFile(context, file)
-                },
-                onLongClick = { viewModel.selectSingleFile(file) }
-            )
-            .padding(10.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            if (isSelectionMode) {
-                Checkbox(checked = isSelected, onCheckedChange = { viewModel.toggleFileSelection(file) })
-            } else {
-                Spacer(modifier = Modifier.weight(1f))
-                Text(text = "ℹ️", modifier = Modifier.clickable { onShowDetails(file) }.padding(2.dp), fontSize = 18.sp)
-            }
-        }
-        val ext = file.extension.lowercase()
-        val isImage = ext in listOf("jpg", "jpeg", "gif", "bmp")
-        val isVideo = ext in listOf("mp4", "mkv", "avi", "mov", "webm")
-        val isPdf = ext == "pdf"
-        val isApk = ext == "apk"
-
-        if (isImage || isVideo) {
-            AsyncImage(
-                model = file, contentDescription = "Miniatura",
-                modifier = Modifier.size(80.dp).padding(bottom = 6.dp).clip(RoundedCornerShape(8.dp)),
-                contentScale = ContentScale.Crop
-            )
-        } else if (isPdf) {
-            PdfThumbnail(file = file, modifier = Modifier.size(80.dp).padding(bottom = 6.dp))
-        } else if (isApk) {
-            ApkIconThumbnail(file = file, context = context, modifier = Modifier.size(80.dp).padding(bottom = 6.dp))
-        } else {
-            val iconEmoji = when {
-                file.isDirectory -> "📁"
-                ext == "zip" -> "📦"
-                ext in listOf("mp3", "wav", "ogg", "flac", "m4a") -> "🎵"
-                else -> "📄"
-            }
-            Text(text = iconEmoji, fontSize = 56.sp, modifier = Modifier.padding(bottom = 6.dp))
-        }
-        Text(text = file.name, style = MaterialTheme.typography.labelMedium, maxLines = 2, overflow = TextOverflow.Ellipsis, color = Color(0xFF1A1C1E))
-    }
-}
-
-// ==========================================
-// ACTIVIDAD DE PUNTO DE ENTRADA
-// ==========================================
-
-class MainActivity : ComponentActivity() {
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-
-        val builder = StrictMode.VmPolicy.Builder()
-        StrictMode.setVmPolicy(builder.build())
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            if (!Environment.isExternalStorageManager()) {
-                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
-                    data = Uri.parse("package:$packageName")
-                }
-                startActivity(intent)
-            }
-        }
-
-        setContent {
-            MaterialTheme {
-                Surface {
-                    val viewModel: FileManagerViewModel = viewModel()
-                    FileListScreen(viewModel = viewModel)
-                }
-            }
-        }
-    }
-}
+@OptIn(ExperimentalFoundationApi::
