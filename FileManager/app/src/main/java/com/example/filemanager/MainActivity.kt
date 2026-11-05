@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.pdf.PdfRenderer
@@ -26,6 +25,9 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -57,9 +59,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.viewModelScope
-import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import coil.compose.AsyncImage
@@ -78,7 +77,6 @@ import org.apache.ftpserver.usermanager.impl.WritePermission
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
-import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -116,6 +114,7 @@ data class AppItem(
 )
 
 data class DuplicateGroup(
+    val fileName: String,
     val fileSize: Long,
     val files: List<File>
 )
@@ -257,7 +256,7 @@ class FileManagerViewModel : ViewModel() {
     }
 
     fun toggleLargeFileSort() {
-        _largeFileSort.value = if (_largeFileSort.value == LargeFileSort.DESCENDING) LargeFileSort.ASCENDING else LargeFileSort.ASCENDING
+        _largeFileSort.value = if (_largeFileSort.value == LargeFileSort.DESCENDING) LargeFileSort.ASCENDING else LargeFileSort.DESCENDING
         if (_currentCategory.value == FileCategory.LARGE_FILES) {
             scanAllFilesByCategory(FileCategory.LARGE_FILES)
         }
@@ -334,7 +333,7 @@ class FileManagerViewModel : ViewModel() {
     fun closeSearch() {
         _isSearchActive.value = false
         _searchQuery.value = ""
-        if (_currentCategory.value == FileCategory.ALL) loadFiles() else scanAllFilesByCategory(_currentCategory.value)
+        refreshCurrentCategoryView()
     }
 
     fun setViewMode(mode: ViewMode) { _viewMode.value = mode }
@@ -348,7 +347,7 @@ class FileManagerViewModel : ViewModel() {
         val newFolder = File(_currentDirectory.value, folderName)
         if (!newFolder.exists()) {
             if (newFolder.mkdirs()) {
-                loadFiles()
+                refreshCurrentCategoryView()
                 Toast.makeText(context, "Carpeta creada", Toast.LENGTH_SHORT).show()
             } else {
                 Toast.makeText(context, "Error al crear la carpeta", Toast.LENGTH_SHORT).show()
@@ -396,9 +395,9 @@ class FileManagerViewModel : ViewModel() {
                     } else if (file.isFile) {
                         val ext = file.extension.lowercase()
                         val match = when (category) {
-                            FileCategory.IMAGES -> ext in listOf("jpg", "jpeg", "png", "gif", "bmp")
+                            // Sin archivos .png ni .webp en imágenes
+                            FileCategory.IMAGES -> ext in listOf("jpg", "jpeg", "gif", "bmp")
                             FileCategory.VIDEOS -> ext in listOf("mp4", "mkv", "avi", "mov", "webm")
-                            FileCategory.AUDIO -> ext in listOf("mp3", "wav", "ogg", "flac", "m4a")
                             else -> false
                         }
                         if (match) {
@@ -433,9 +432,8 @@ class FileManagerViewModel : ViewModel() {
                 if (file.name.startsWith(".")) return@filter false
                 val ext = file.extension.lowercase()
                 when (category) {
-                    FileCategory.IMAGES -> ext in listOf("jpg", "jpeg", "png", "gif", "bmp")
+                    FileCategory.IMAGES -> ext in listOf("jpg", "jpeg", "gif", "bmp")
                     FileCategory.VIDEOS -> ext in listOf("mp4", "mkv", "avi", "mov", "webm")
-                    FileCategory.AUDIO -> ext in listOf("mp3", "wav", "ogg", "flac", "m4a")
                     else -> false
                 }
             } ?: emptyList()
@@ -470,7 +468,7 @@ class FileManagerViewModel : ViewModel() {
                         if (len >= threshold) largeList.add(file)
 
                         when (file.extension.lowercase()) {
-                            "jpg", "jpeg", "png", "gif", "bmp" -> imgBytes += len
+                            "jpg", "jpeg", "gif", "bmp" -> imgBytes += len
                             "mp4", "mkv", "avi", "mov", "webm" -> vidBytes += len
                             "mp3", "wav", "ogg", "flac", "m4a" -> audBytes += len
                             "pdf", "doc", "docx", "xls", "xlsx", "txt", "ppt", "pptx" -> docBytes += len
@@ -622,27 +620,14 @@ class FileManagerViewModel : ViewModel() {
         }
     }
 
-    private fun getFileHash(file: File): String {
-        return try {
-            val digest = MessageDigest.getInstance("MD5")
-            file.inputStream().use { inputStream ->
-                val buffer = ByteArray(8192)
-                var bytesRead: Int
-                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                    digest.update(buffer, 0, bytesRead)
-                }
-            }
-            digest.digest().joinToString("") { "%02x".format(it) }
-        } catch (e: Exception) { "" }
-    }
-
+    // Duplicados agrupados por coincidencia exacta del nombre del archivo (insensible a mayúsculas/minúsculas)
     fun scanForDuplicates(context: Context) {
         if (_isScanningDuplicates.value) return
         _isScanningDuplicates.value = true
 
         viewModelScope.launch(Dispatchers.IO) {
             val rootDir = Environment.getExternalStorageDirectory()
-            val filesBySize = mutableMapOf<Long, MutableList<File>>()
+            val filesByName = mutableMapOf<String, MutableList<File>>()
 
             fun collectFiles(dir: File) {
                 val list = dir.listFiles() ?: return
@@ -650,21 +635,21 @@ class FileManagerViewModel : ViewModel() {
                     if (file.name.startsWith(".") || file.name == ".TrashBin") continue
                     if (file.isDirectory) collectFiles(file)
                     else if (file.isFile && file.length() > 0) {
-                        filesBySize.getOrPut(file.length()) { mutableListOf() }.add(file)
+                        val key = file.name.lowercase(Locale.getDefault())
+                        filesByName.getOrPut(key) { mutableListOf() }.add(file)
                     }
                 }
             }
 
             collectFiles(rootDir)
-            val duplicatesList = mutableListOf<DuplicateGroup>()
-            filesBySize.filter { it.value.size > 1 }.forEach { (size, candidateFiles) ->
-                val filesByHash = candidateFiles.groupBy { getFileHash(it) }
-                filesByHash.filter { it.key.isNotEmpty() && it.value.size > 1 }.forEach { (_, matchedFiles) ->
-                    duplicatesList.add(DuplicateGroup(size, matchedFiles))
-                }
-            }
 
-            duplicatesList.sortByDescending { it.fileSize * it.files.size }
+            val duplicatesList = filesByName.filter { it.value.size > 1 }.map { (name, list) ->
+                DuplicateGroup(
+                    fileName = list.first().name,
+                    fileSize = list.first().length(),
+                    files = list
+                )
+            }.sortedByDescending { it.files.size }
 
             launch(Dispatchers.Main) {
                 _duplicateFiles.value = duplicatesList
@@ -675,11 +660,7 @@ class FileManagerViewModel : ViewModel() {
 
     fun toggleHiddenFiles() {
         _showHiddenFiles.value = !_showHiddenFiles.value
-        if (_currentCategory.value == FileCategory.ALL || _currentCategory.value == FileCategory.TRASH) {
-            loadFiles()
-        } else if (_currentCategory.value != FileCategory.APPS && _currentCategory.value != FileCategory.DUPLICATES && _currentCategory.value != FileCategory.FTP_SERVER) {
-            scanAllFilesByCategory(_currentCategory.value)
-        }
+        refreshCurrentCategoryView()
     }
 
     fun toggleViewMode() {
@@ -766,7 +747,8 @@ class FileManagerViewModel : ViewModel() {
 
         when (category) {
             FileCategory.ALL -> loadFiles()
-            FileCategory.IMAGES, FileCategory.VIDEOS, FileCategory.AUDIO -> scanMediaByFolders(category)
+            FileCategory.IMAGES, FileCategory.VIDEOS -> scanMediaByFolders(category)
+            FileCategory.AUDIO -> scanAllFilesByCategory(FileCategory.AUDIO) // Audio en lista directa sin subcategorías
             FileCategory.DOWNLOADS -> {
                 _currentDirectory.value = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
                 _currentCategory.value = FileCategory.ALL
@@ -803,9 +785,10 @@ class FileManagerViewModel : ViewModel() {
                     } else if (file.isFile) {
                         val ext = file.extension.lowercase()
                         when (category) {
+                            FileCategory.AUDIO -> if (ext in listOf("mp3", "wav", "ogg", "flac", "m4a")) resultFiles.add(file)
                             FileCategory.DOCUMENTS -> if (ext in listOf("pdf", "doc", "docx", "xls", "xlsx", "txt", "ppt", "pptx")) resultFiles.add(file)
                             FileCategory.APKs -> if (ext == "apk") resultFiles.add(file)
-                            FileCategory.OTHERS -> if (ext !in listOf("jpg", "jpeg", "png", "gif", "bmp", "mp4", "mkv", "avi", "mov", "webm", "mp3", "wav", "ogg", "flac", "m4a", "pdf", "doc", "docx", "xls", "xlsx", "txt", "ppt", "pptx", "apk")) resultFiles.add(file)
+                            FileCategory.OTHERS -> if (ext !in listOf("jpg", "jpeg", "gif", "bmp", "mp4", "mkv", "avi", "mov", "webm", "mp3", "wav", "ogg", "flac", "m4a", "pdf", "doc", "docx", "xls", "xlsx", "txt", "ppt", "pptx", "apk")) resultFiles.add(file)
                             FileCategory.LARGE_FILES -> if (file.length() >= threshold) resultFiles.add(file)
                             else -> {}
                         }
@@ -957,7 +940,7 @@ class FileManagerViewModel : ViewModel() {
         }
         if (successCount > 0) {
             if (isCutOperation) clearClipboard()
-            if (_currentCategory.value == FileCategory.ALL || _currentCategory.value == FileCategory.TRASH) loadFiles() else setCategory(_currentCategory.value)
+            refreshCurrentCategoryView()
             return true
         }
         return false
@@ -967,6 +950,19 @@ class FileManagerViewModel : ViewModel() {
         clipboardFiles = emptyList()
         isCutOperation = false
         _hasClipboardData.value = false
+    }
+
+    // Refresca manteniendo el estado de navegación actual intacto
+    fun refreshCurrentCategoryView() {
+        if (_selectedMediaFolder.value != null) {
+            selectMediaFolder(_selectedMediaFolder.value!!, _currentCategory.value)
+        } else if (_isSearchActive.value && _searchQuery.value.isNotBlank()) {
+            searchGlobally(_searchQuery.value)
+        } else if (_currentCategory.value == FileCategory.ALL || _currentCategory.value == FileCategory.TRASH) {
+            loadFiles()
+        } else {
+            scanAllFilesByCategory(_currentCategory.value)
+        }
     }
 
     fun deleteSelectedFiles(permanent: Boolean = false) {
@@ -981,27 +977,20 @@ class FileManagerViewModel : ViewModel() {
             }
         }
         clearSelection()
-
-        if (_isSearchActive.value && _searchQuery.value.isNotBlank()) {
-            searchGlobally(_searchQuery.value)
-        } else if (_currentCategory.value == FileCategory.ALL || _currentCategory.value == FileCategory.TRASH) {
-            loadFiles()
-        } else {
-            scanAllFilesByCategory(_currentCategory.value)
-        }
+        refreshCurrentCategoryView()
     }
 
     fun restoreSelectedFiles() {
         val destDir = Environment.getExternalStorageDirectory()
         _selectedFiles.value.forEach { file -> file.renameTo(File(destDir, file.name)) }
         clearSelection()
-        loadFiles()
+        refreshCurrentCategoryView()
     }
 
     fun renameFile(file: File, newName: String) {
         val newFile = File(file.parent, newName)
         if (file.renameTo(newFile)) {
-            if (_currentCategory.value == FileCategory.ALL) loadFiles() else setCategory(_currentCategory.value)
+            refreshCurrentCategoryView()
         }
     }
 
@@ -1017,7 +1006,7 @@ class FileManagerViewModel : ViewModel() {
                 }
                 launch(Dispatchers.Main) {
                     clearSelection()
-                    if (_currentCategory.value == FileCategory.ALL) loadFiles() else setCategory(_currentCategory.value)
+                    refreshCurrentCategoryView()
                     Toast.makeText(context, "ZIP creado", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
@@ -1072,7 +1061,7 @@ class FileManagerViewModel : ViewModel() {
                     zis.closeEntry()
                 }
                 launch(Dispatchers.Main) {
-                    if (_currentCategory.value == FileCategory.ALL || _currentCategory.value == FileCategory.TRASH) loadFiles() else setCategory(_currentCategory.value)
+                    refreshCurrentCategoryView()
                     Toast.makeText(context, "Extraído en: ${destDir.name}", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
@@ -1256,7 +1245,7 @@ fun formatTime(ms: Long): String {
 
 @Composable
 fun PdfThumbnail(file: File, modifier: Modifier = Modifier) {
-    var bitmap by remember(file) { mutableStateOf<Bitmap?>(null) }
+    var bitmap by remember(file) { mutableStateOf<android.graphics.Bitmap?>(null) }
 
     LaunchedEffect(file) {
         withContext(Dispatchers.IO) {
@@ -1265,7 +1254,7 @@ fun PdfThumbnail(file: File, modifier: Modifier = Modifier) {
                 val renderer = PdfRenderer(pfd)
                 if (renderer.pageCount > 0) {
                     val page = renderer.openPage(0)
-                    val bmp = Bitmap.createBitmap(page.width / 2, page.height / 2, Bitmap.Config.ARGB_8888)
+                    val bmp = android.graphics.Bitmap.createBitmap(page.width / 2, page.height / 2, android.graphics.Bitmap.Config.ARGB_8888)
                     page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                     page.close()
                     renderer.close()
@@ -1290,7 +1279,7 @@ fun PdfThumbnail(file: File, modifier: Modifier = Modifier) {
 
 @Composable
 fun ApkIconThumbnail(file: File, context: Context, modifier: Modifier = Modifier) {
-    var iconBitmap by remember(file) { mutableStateOf<Bitmap?>(null) }
+    var iconBitmap by remember(file) { mutableStateOf<android.graphics.Bitmap?>(null) }
 
     LaunchedEffect(file) {
         withContext(Dispatchers.IO) {
@@ -1921,6 +1910,7 @@ fun FileDetailsDialog(file: File, onDismiss: () -> Unit) {
     )
 }
 
+// Duplicados agrupados por concordancia de caracteres de nombre
 @Composable
 fun DuplicatesScreen(viewModel: FileManagerViewModel) {
     val duplicates by viewModel.duplicateFiles.collectAsState()
@@ -1939,7 +1929,7 @@ fun DuplicatesScreen(viewModel: FileManagerViewModel) {
         if (isScanning) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
         } else if (duplicates.isEmpty()) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("No se encontraron archivos duplicados.") }
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("No se encontraron archivos duplicados por nombre.") }
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 items(duplicates) { group ->
@@ -1951,7 +1941,7 @@ fun DuplicatesScreen(viewModel: FileManagerViewModel) {
                         shape = RoundedCornerShape(12.dp)
                     ) {
                         Column(modifier = Modifier.padding(12.dp)) {
-                            Text("Tamaño: ${viewModel.formatSize(group.fileSize)} por archivo (${group.files.size} copias)", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                            Text("Nombre: ${group.fileName} (${group.files.size} copias)", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                             Spacer(modifier = Modifier.height(6.dp))
                             group.files.forEach { file ->
                                 Row(
@@ -2241,7 +2231,7 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
                         val singleSelected = selectedFiles.firstOrNull()
                         val isZip = selectedFiles.size == 1 && singleSelected?.extension?.lowercase() == "zip"
                         val ext = singleSelected?.extension?.lowercase() ?: ""
-                        val isImg = selectedFiles.size == 1 && ext in listOf("jpg", "jpeg", "png", "gif", "bmp")
+                        val isImg = selectedFiles.size == 1 && ext in listOf("jpg", "jpeg", "gif", "bmp")
                         val isAud = selectedFiles.size == 1 && ext in listOf("mp3", "wav", "ogg", "flac", "m4a")
 
                         ActionBottomSheet(
@@ -2295,7 +2285,7 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
                             currentCategory == FileCategory.FTP_SERVER -> FtpServerScreen(viewModel)
                             currentCategory == FileCategory.DUPLICATES -> DuplicatesScreen(viewModel)
                             currentCategory == FileCategory.LARGE_FILES -> LargeFilesScreen(viewModel)
-                            (currentCategory == FileCategory.IMAGES || currentCategory == FileCategory.VIDEOS || currentCategory == FileCategory.AUDIO) && selectedMediaFolder == null -> {
+                            (currentCategory == FileCategory.IMAGES || currentCategory == FileCategory.VIDEOS) && selectedMediaFolder == null -> {
                                 MediaFolderGridScreen(viewModel = viewModel, category = currentCategory)
                             }
                             currentCategory == FileCategory.APPS -> {
@@ -2374,7 +2364,7 @@ fun FileListItem(
         if (isSelectionMode) Checkbox(checked = isSelected, onCheckedChange = { viewModel.toggleFileSelection(file) }, modifier = Modifier.padding(end = 8.dp))
 
         val ext = file.extension.lowercase()
-        val isImage = ext in listOf("jpg", "jpeg", "png", "gif", "bmp")
+        val isImage = ext in listOf("jpg", "jpeg", "gif", "bmp")
         val isVideo = ext in listOf("mp4", "mkv", "avi", "mov", "webm")
         val isPdf = ext == "pdf"
         val isApk = ext == "apk"
@@ -2441,7 +2431,7 @@ fun FileGridItem(
             }
         }
         val ext = file.extension.lowercase()
-        val isImage = ext in listOf("jpg", "jpeg", "png", "gif", "bmp")
+        val isImage = ext in listOf("jpg", "jpeg", "gif", "bmp")
         val isVideo = ext in listOf("mp4", "mkv", "avi", "mov", "webm")
         val isPdf = ext == "pdf"
         val isApk = ext == "apk"
