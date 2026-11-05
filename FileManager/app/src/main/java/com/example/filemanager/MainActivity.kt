@@ -104,13 +104,19 @@ data class AppItem(
     val name: String,
     val packageName: String,
     val sourceDir: String,
-    val sizeBytes: Long = 0L
+    val sizeBytes: Long = 0L,
+    val isUserApp: Boolean = true
 )
 
 data class DuplicateGroup(
     val fileSize: Long,
     val files: List<File>
 )
+
+enum class LargeFileSort {
+    DESCENDING,
+    ASCENDING
+}
 
 enum class FileCategory {
     ALL, IMAGES, VIDEOS, AUDIO, DOCUMENTS, DOWNLOADS, APKs, OTHERS, RECENT_MODIFIED, APPS, TRASH, FTP_SERVER, DUPLICATES, LARGE_FILES, STORAGE_ANALYSIS
@@ -176,8 +182,11 @@ class FileManagerViewModel : ViewModel() {
     private val _largeFiles = MutableStateFlow<List<File>>(emptyList())
     val largeFiles: StateFlow<List<File>> = _largeFiles
 
-    private val _largeFileThreshold = MutableStateFlow(300L * 1024 * 1024)
+    private val _largeFileThreshold = MutableStateFlow(100L * 1024 * 1024)
     val largeFileThreshold: StateFlow<Long> = _largeFileThreshold
+
+    private val _largeFileSort = MutableStateFlow(LargeFileSort.DESCENDING)
+    val largeFileSort: StateFlow<LargeFileSort> = _largeFileSort
 
     private val _isFtpRunning = MutableStateFlow(false)
     val isFtpRunning: StateFlow<Boolean> = _isFtpRunning
@@ -196,7 +205,7 @@ class FileManagerViewModel : ViewModel() {
     val isScanningDuplicates: StateFlow<Boolean> = _isScanningDuplicates
 
     private var exoPlayer: ExoPlayer? = null
-    
+
     private val _currentlyPlayingAudio = MutableStateFlow<File?>(null)
     val currentlyPlayingAudio: StateFlow<File?> = _currentlyPlayingAudio
 
@@ -220,6 +229,13 @@ class FileManagerViewModel : ViewModel() {
             scanAllFilesByCategory(FileCategory.LARGE_FILES)
         } else if (_currentCategory.value == FileCategory.STORAGE_ANALYSIS) {
             analyzeCategorySizes()
+        }
+    }
+
+    fun toggleLargeFileSort() {
+        _largeFileSort.value = if (_largeFileSort.value == LargeFileSort.DESCENDING) LargeFileSort.ASCENDING else LargeFileSort.DESCENDING
+        if (_currentCategory.value == FileCategory.LARGE_FILES) {
+            scanAllFilesByCategory(FileCategory.LARGE_FILES)
         }
     }
 
@@ -340,6 +356,19 @@ class FileManagerViewModel : ViewModel() {
         }
     }
 
+    fun openAndSelectDuplicates(duplicateGroup: DuplicateGroup) {
+        if (duplicateGroup.files.isEmpty()) return
+        val parentDir = duplicateGroup.files.first().parentFile
+        if (parentDir != null && parentDir.exists() && parentDir.canRead()) {
+            _currentDirectory.value = parentDir
+            _currentCategory.value = FileCategory.ALL
+            _selectedFiles.value = duplicateGroup.files.toSet()
+            _isSelectionMode.value = true
+            updateSearchQuery("")
+            loadFiles()
+        }
+    }
+
     fun analyzeCategorySizes() {
         viewModelScope.launch(Dispatchers.IO) {
             val rootDir = Environment.getExternalStorageDirectory()
@@ -394,18 +423,23 @@ class FileManagerViewModel : ViewModel() {
         viewModelScope.launch(Dispatchers.IO) {
             val pm = context.packageManager
             val apps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
-                .filter { appInfo -> (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) == 0 }
+                .filter { appInfo ->
+                    val isSystem = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+                    val isUpdatedSystem = (appInfo.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
+                    !isSystem || isUpdatedSystem
+                }
                 .map { appInfo ->
                     val file = File(appInfo.publicSourceDir)
                     AppItem(
                         name = appInfo.loadLabel(pm).toString(),
                         packageName = appInfo.packageName,
                         sourceDir = appInfo.publicSourceDir,
-                        sizeBytes = if (file.exists()) file.length() else 0L
+                        sizeBytes = if (file.exists()) file.length() else 0L,
+                        isUserApp = true
                     )
                 }
                 .sortedByDescending { it.sizeBytes }
-            
+
             launch(Dispatchers.Main) { _installedApps.value = apps }
         }
     }
@@ -662,11 +696,11 @@ class FileManagerViewModel : ViewModel() {
                 loadFiles()
             }
             FileCategory.APPS -> if (context != null) loadApps(context)
-            FileCategory.DUPLICATES -> if (context != null) scanForDuplicates(context)
+            FileCategory.DUPLICATES -> if (context != null && _duplicateFiles.value.isEmpty()) scanForDuplicates(context)
             FileCategory.STORAGE_ANALYSIS -> if (context != null) {
                 calculateStorageStats(context)
                 analyzeCategorySizes()
-                scanForDuplicates(context)
+                if (_duplicateFiles.value.isEmpty()) scanForDuplicates(context)
                 loadApps(context)
             }
             FileCategory.FTP_SERVER -> {}
@@ -701,12 +735,13 @@ class FileManagerViewModel : ViewModel() {
                     }
                 }
             }
-            
+
             searchDirectory(rootDir)
-            
+
             launch(Dispatchers.Main) {
                 allScannedFiles = if (category == FileCategory.LARGE_FILES) {
-                    resultFiles.sortedByDescending { it.length() }
+                    if (_largeFileSort.value == LargeFileSort.DESCENDING) resultFiles.sortedByDescending { it.length() }
+                    else resultFiles.sortedBy { it.length() }
                 } else {
                     resultFiles
                 }
@@ -891,7 +926,7 @@ class FileManagerViewModel : ViewModel() {
         if (_selectedFiles.value.isEmpty()) return
         val targetDir = if (_currentCategory.value == FileCategory.ALL) _currentDirectory.value else Environment.getExternalStorageDirectory()
         val zipFile = File(targetDir, if (zipName.endsWith(".zip")) zipName else "$zipName.zip")
-        
+
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 ZipOutputStream(FileOutputStream(zipFile)).use { zos ->
@@ -1005,7 +1040,7 @@ class FileManagerViewModel : ViewModel() {
     }
 }
 
-// --- DIÁLOGO INICIAL DE SOLICITUD DE PERMISOS GENÉRICO ---
+// --- DIÁLOGO INICIAL DE PERMISOS ---
 
 @Composable
 fun PermissionDialog(
@@ -1021,7 +1056,7 @@ fun PermissionDialog(
     )
 }
 
-// --- COMPOSABLE DEL REPRODUCTOR INTERNO DE AUDIO ---
+// --- REPRODUCTOR INTERNO DE AUDIO ---
 
 @Composable
 fun AudioPlayerBar(viewModel: FileManagerViewModel) {
@@ -1373,7 +1408,7 @@ fun StorageAnalysisScreen(viewModel: FileManagerViewModel) {
 
                     Spacer(modifier = Modifier.height(8.dp))
                     TextButton(onClick = { viewModel.setCategory(FileCategory.APPS, context, fromStorageAnalysis = true) }, modifier = Modifier.align(Alignment.CenterHorizontally)) {
-                        Text("VER MÁS", fontWeight = FontWeight.Bold, color = Color(0xFF1A1C1E))
+                        Text("MAS DETALLES", fontWeight = FontWeight.Bold, color = Color(0xFF1A1C1E))
                     }
                 }
             }
@@ -1406,7 +1441,7 @@ fun StorageAnalysisScreen(viewModel: FileManagerViewModel) {
 
                     Spacer(modifier = Modifier.height(8.dp))
                     TextButton(onClick = { viewModel.setCategory(FileCategory.LARGE_FILES, context, fromStorageAnalysis = true) }, modifier = Modifier.align(Alignment.CenterHorizontally)) {
-                        Text("VER MÁS", fontWeight = FontWeight.Bold, color = Color(0xFF1A1C1E))
+                        Text("MAS DETALLES", fontWeight = FontWeight.Bold, color = Color(0xFF1A1C1E))
                     }
                 }
             }
@@ -1440,7 +1475,7 @@ fun StorageAnalysisScreen(viewModel: FileManagerViewModel) {
 
                     Spacer(modifier = Modifier.height(8.dp))
                     TextButton(onClick = { viewModel.setCategory(FileCategory.DUPLICATES, context, fromStorageAnalysis = true) }, modifier = Modifier.align(Alignment.CenterHorizontally)) {
-                        Text("VER MÁS", fontWeight = FontWeight.Bold, color = Color(0xFF1A1C1E))
+                        Text("MAS DETALLES", fontWeight = FontWeight.Bold, color = Color(0xFF1A1C1E))
                     }
                 }
             }
@@ -1454,7 +1489,9 @@ fun StorageAnalysisScreen(viewModel: FileManagerViewModel) {
 fun LargeFilesScreen(viewModel: FileManagerViewModel) {
     val largeFiles by viewModel.files.collectAsState()
     val threshold by viewModel.largeFileThreshold.collectAsState()
+    val sortOrder by viewModel.largeFileSort.collectAsState()
     var expanded by remember { mutableStateOf(false) }
+    val context = LocalContext.current
 
     val options = listOf(
         "100 MB" to 100L * 1024 * 1024,
@@ -1463,6 +1500,14 @@ fun LargeFilesScreen(viewModel: FileManagerViewModel) {
         "1 GB" to 1024L * 1024 * 1024
     )
 
+    val sortedList = remember(largeFiles, sortOrder) {
+        if (sortOrder == LargeFileSort.DESCENDING) {
+            largeFiles.sortedByDescending { it.length() }
+        } else {
+            largeFiles.sortedBy { it.length() }
+        }
+    }
+
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -1470,47 +1515,52 @@ fun LargeFilesScreen(viewModel: FileManagerViewModel) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text("Archivos pesados", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            
-            Box {
-                OutlinedButton(onClick = { expanded = true }) {
-                    Text("> ${viewModel.formatSize(threshold)}")
+
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                IconButton(onClick = { viewModel.setCategory(FileCategory.LARGE_FILES, context) }) {
+                    Text("🔄", fontSize = 18.sp)
                 }
-                DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                    options.forEach { (label, size) ->
-                        DropdownMenuItem(
-                            text = { Text(label) },
-                            onClick = {
-                                viewModel.setLargeFileThreshold(size)
-                                expanded = false
-                            }
-                        )
+
+                IconButton(onClick = { viewModel.toggleLargeFileSort() }) {
+                    Text(if (sortOrder == LargeFileSort.DESCENDING) "⬇️" else "⬆️", fontSize = 18.sp)
+                }
+
+                Box {
+                    OutlinedButton(onClick = { expanded = true }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)) {
+                        Text("≥ ${viewModel.formatSize(threshold)}")
+                    }
+                    DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                        options.forEach { (label, size) ->
+                            DropdownMenuItem(
+                                text = { Text(label) },
+                                onClick = {
+                                    viewModel.setLargeFileThreshold(size)
+                                    expanded = false
+                                }
+                            )
+                        }
                     }
                 }
             }
         }
-        
+
         Spacer(modifier = Modifier.height(12.dp))
-        
-        if (largeFiles.isEmpty()) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { 
-                Text("No hay archivos mayores a ${viewModel.formatSize(threshold)}.") 
+
+        if (sortedList.isEmpty()) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("No hay archivos mayores a ${viewModel.formatSize(threshold)}.")
             }
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(largeFiles) { file ->
+                items(sortedList) { file ->
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable {
-                                file.parentFile?.let { viewModel.navigateToDirectory(it) }
-                            },
+                            .clickable { file.parentFile?.let { viewModel.navigateToDirectory(it) } },
                         colors = CardDefaults.cardColors(containerColor = Color(0xFFF7F9FC)),
                         shape = RoundedCornerShape(12.dp)
                     ) {
-                        Row(
-                            modifier = Modifier.padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
+                        Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                             Text("📄", fontSize = 32.sp, modifier = Modifier.padding(end = 12.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(file.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -1525,7 +1575,7 @@ fun LargeFilesScreen(viewModel: FileManagerViewModel) {
     }
 }
 
-// --- PANTALLA DE SERVIDOR FTP COMPLETAMENTE CENTRADA ---
+// --- PANTALLA DE SERVIDOR FTP ---
 
 @Composable
 fun FtpServerScreen(viewModel: FileManagerViewModel) {
@@ -1732,7 +1782,7 @@ fun DuplicatesScreen(viewModel: FileManagerViewModel) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text("Archivos Duplicados", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             Button(onClick = { viewModel.scanForDuplicates(context) }, enabled = !isScanning) {
-                Text(if (isScanning) "Escaneando..." else "🔍 Re-escanear")
+                Text(if (isScanning) "Escaneando..." else "🔄 Re-escanear")
             }
         }
         Spacer(modifier = Modifier.height(12.dp))
@@ -1748,7 +1798,7 @@ fun DuplicatesScreen(viewModel: FileManagerViewModel) {
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable {
-                                viewModel.selectMultipleFilesAndNavigate(group.files)
+                                viewModel.openAndSelectDuplicates(group)
                             },
                         colors = CardDefaults.cardColors(containerColor = Color(0xFFF0F4F8)),
                         shape = RoundedCornerShape(12.dp)
@@ -2210,11 +2260,10 @@ fun FileGridItem(
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
+
         val builder = StrictMode.VmPolicy.Builder()
         StrictMode.setVmPolicy(builder.build())
 
-        // Solicitar el permiso "Acceso a todos los archivos" en Android 11 (API 30) o superior
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             if (!Environment.isExternalStorageManager()) {
                 val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
