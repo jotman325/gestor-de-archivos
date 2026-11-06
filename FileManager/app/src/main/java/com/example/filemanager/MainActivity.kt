@@ -2102,7 +2102,19 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val coroutineScope = rememberCoroutineScope()
 
-    var showPermissionDialog by remember { mutableStateOf(false) }
+    // 1. LA FUNCIÓN SE MUEVE AQUÍ ARRIBA
+    fun checkStoragePermission(ctx: Context): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Environment.isExternalStorageManager()
+        } else {
+            val write = ContextCompat.checkSelfPermission(ctx, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+            val read = ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+            write && read
+        }
+    }
+
+    // 2. LA VARIABLE ARRANCA COMPROBANDO LOS PERMISOS AL INSTANTE
+    var showPermissionDialog by remember { mutableStateOf(!checkStoragePermission(context)) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
@@ -2117,20 +2129,10 @@ fun FileListScreen(viewModel: FileManagerViewModel) {
         }
     }
 
-    fun checkStoragePermission(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            Environment.isExternalStorageManager()
-        } else {
-            val write = ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
-            val read = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
-            write && read
-        }
-    }
-
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
-                showPermissionDialog = !checkStoragePermission()
+                showPermissionDialog = !checkStoragePermission(context)
                 if (!showPermissionDialog) {
                     viewModel.calculateStorageStats(context)
                     viewModel.loadFiles()
